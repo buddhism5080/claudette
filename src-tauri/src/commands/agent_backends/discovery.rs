@@ -1,13 +1,11 @@
 //! Per-backend model-list discovery + connectivity checks. Talks to:
 //!
 //! - Ollama's /api/tags
-//! - LM Studio's /api/v0/models (preferred) and OpenAI-shaped /v1/models
 //! - Cloud OpenAI's /v1/models
 //! - Custom Anthropic gateways' /v1/models
 //! - The Codex CLI (`codex debug models` + `codex login status`) for the
 //!   subscription-auth catalog
 //! - The Codex app-server's `list_models` for native-Codex picker rows
-//! - The Pi sidecar's discoverModels (pi-sdk feature only)
 //!
 //! Also owns the small Codex-CLI command builder that suppresses the
 //! Windows console window for every probe and the OpenAI URL builder
@@ -21,9 +19,6 @@ use claudette::agent::{
 use claudette::agent_backend::{AgentBackendConfig, AgentBackendKind, AgentBackendModel};
 use claudette::plugin::load_secure_secret;
 use serde_json::Value;
-
-#[cfg(feature = "pi-sdk")]
-use claudette::agent::PiSdkSession;
 
 use super::config::{BackendStatus, SECRET_BUCKET};
 
@@ -96,9 +91,6 @@ pub(super) async fn discover_models(
         AgentBackendKind::OpenAiApi => discover_openai_api_models(backend).await,
         AgentBackendKind::CodexSubscription => discover_codex_models().await,
         AgentBackendKind::CodexNative => discover_codex_native_models(backend).await,
-        AgentBackendKind::LmStudio => discover_lm_studio_models(backend).await,
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendKind::PiSdk => discover_pi_models(backend).await,
         _ => Ok(backend.manual_models.clone()),
     }
 }
@@ -120,16 +112,6 @@ pub(super) async fn test_backend_connectivity(
             ))
         }
         AgentBackendKind::CodexNative => test_codex_native_connectivity(backend).await,
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendKind::PiSdk => discover_pi_models(backend).await.map(|models| {
-            BackendStatus::new(
-                true,
-                format!(
-                    "Pi SDK harness is available. Found {} model(s). Use `pi auth` to configure providers.",
-                    models.len()
-                ),
-            )
-        }),
         AgentBackendKind::OpenAiApi => discover_openai_api_models(backend).await.map(|models| {
             BackendStatus::new(
                 true,
@@ -199,167 +181,6 @@ async fn discover_openai_api_models(
         &value,
         backend.context_window_default,
     )))
-}
-
-async fn discover_lm_studio_models(
-    backend: &AgentBackendConfig,
-) -> Result<Vec<AgentBackendModel>, String> {
-    let base = backend
-        .base_url
-        .as_deref()
-        .unwrap_or("http://localhost:1234")
-        .trim_end_matches('/');
-    // Treat secure-store failures as soft (a corrupt keychain entry is
-    // distinct from "no secret was ever set") and tell the user via the
-    // log so a discovery-fails-silently bug is debuggable. A missing /
-    // blank secret is fine — LM Studio accepts any bearer locally and
-    // we substitute a placeholder below.
-    let secret = match load_secure_secret(SECRET_BUCKET, &backend.id) {
-        Ok(maybe) => maybe,
-        Err(err) => {
-            tracing::warn!(
-                target: "claudette::backend",
-                backend_id = %backend.id,
-                error = %err,
-                "LM Studio secret unreadable from secure store — falling back to placeholder bearer for discovery"
-            );
-            None
-        }
-    };
-    // LM Studio's local server accepts any bearer — empty included — but
-    // some users front it with an authenticating proxy that rejects
-    // requests *without* an Authorization header even if the value
-    // doesn't matter. Always send a bearer (user-supplied or the
-    // `lm-studio` placeholder) so discovery works in both setups,
-    // matching what the runtime path does.
-    let bearer = secret
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("lm-studio")
-        .to_string();
-    let client = reqwest::Client::new();
-
-    // Prefer LM Studio's native v0 endpoint, which exposes per-model
-    // max_context_length / loaded_context_length. Fall back to the OpenAI-shaped
-    // /v1/models if v0 is missing (older or stripped builds).
-    let v0_response = client
-        .get(format!("{base}/api/v0/models"))
-        .bearer_auth(&bearer)
-        .send()
-        .await;
-    if let Ok(response) = v0_response
-        && response.status().is_success()
-        && let Ok(value) = response.json::<Value>().await
-    {
-        let models = lm_studio_models_from_v0(&value, backend.context_window_default);
-        if !models.is_empty() {
-            return Ok(models);
-        }
-    }
-
-    let value = client
-        .get(openai_api_url(base, "models"))
-        .bearer_auth(&bearer)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to query LM Studio: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("LM Studio model discovery failed: {e}"))?
-        .json::<Value>()
-        .await
-        .map_err(|e| format!("Invalid LM Studio model response: {e}"))?;
-    Ok(models_from_openai_shape(
-        &value,
-        backend.context_window_default,
-    ))
-}
-
-#[cfg(feature = "pi-sdk")]
-async fn discover_pi_models(
-    backend: &AgentBackendConfig,
-) -> Result<Vec<AgentBackendModel>, String> {
-    // Run discovery from the OS temp dir rather than `.` so a Settings
-    // "Refresh models" click can't sweep in workspace state via the
-    // sidecar's cwd. Discovery never touches tools, so the cwd only
-    // matters for `precheck_cwd`; `std::env::temp_dir()` is always
-    // present and identical for every refresh.
-    let cwd = std::env::temp_dir();
-    // Thread keychain-only provider secrets through so Refresh models
-    // sees the same providers as `list_providers`. Without this, a
-    // user who configured OpenRouter with "Keep this key private to
-    // Claudette" would see the provider as configured in the Pi card
-    // but Refresh would still return zero models for it.
-    //
-    // Propagate keychain-read errors instead of dropping them — a
-    // dead secure store has the same symptom (no models discovered)
-    // as a misconfigured provider, and the user needs to know it's
-    // the store, not Pi. `pi_list_providers` and chat startup already
-    // surface this error; mirror that here.
-    let extras = super::pi_auth::pi_local_secret_env()?;
-    let extras_slice: Option<&[(String, String)]> = if extras.is_empty() {
-        None
-    } else {
-        Some(extras.as_slice())
-    };
-    let discovered = PiSdkSession::discover_models_with_env(&cwd, extras_slice).await?;
-    let models: Vec<AgentBackendModel> = discovered
-        .into_iter()
-        .map(|model| AgentBackendModel {
-            id: model.id.clone(),
-            label: if model.label.trim().is_empty() {
-                model.id
-            } else {
-                model.label
-            },
-            context_window_tokens: model
-                .context_window_tokens
-                .unwrap_or(backend.context_window_default),
-            discovered: true,
-        })
-        .collect();
-    // Return an empty Vec when discovery turns up nothing so that
-    // `apply_discovered_models`'s `!discovered.is_empty()` guard keeps the
-    // user's manual_models intact. Substituting the seed list here used to
-    // trick that guard into clearing user-entered manual models.
-    Ok(models)
-}
-
-pub(super) fn lm_studio_models_from_v0(
-    value: &Value,
-    default_context: u32,
-) -> Vec<AgentBackendModel> {
-    value
-        .get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|model| {
-            let id = model.get("id").and_then(Value::as_str)?;
-            // Skip embedding/vision-only entries — they aren't usable as chat
-            // backends for the agent loop. Everything else (LLM, instruct,
-            // unknown) is fair game.
-            if model
-                .get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind.eq_ignore_ascii_case("embeddings"))
-            {
-                return None;
-            }
-            let context = model
-                .get("loaded_context_length")
-                .or_else(|| model.get("max_context_length"))
-                .and_then(Value::as_u64)
-                .and_then(|n| u32::try_from(n).ok())
-                .unwrap_or(default_context);
-            Some(AgentBackendModel {
-                id: id.to_string(),
-                label: id.to_string(),
-                context_window_tokens: context,
-                discovered: true,
-            })
-        })
-        .collect()
 }
 
 pub(super) async fn discover_codex_models() -> Result<Vec<AgentBackendModel>, String> {

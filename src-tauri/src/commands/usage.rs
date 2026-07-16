@@ -41,7 +41,7 @@ pub async fn get_session_usage(
     // stub so the frontend renders the indicator in greyed mode without
     // leaking any per-session token data the user hasn't asked for.
     //
-    // OpenAI / Custom OpenAI / Ollama / LM Studio also default to the
+    // OpenAI / Custom OpenAI / Ollama also default to the
     // `claude_code` harness for gateway translation, but they go to the
     // local-aggregate branch below — the meter shows tokens recorded
     // by Claudette, not Anthropic OAuth quotas, so no gate applies.
@@ -124,19 +124,6 @@ pub async fn get_session_usage(
             (String::from("OpenAI"), Vec::new())
         }
         AgentBackendKind::Ollama => (String::from("Ollama"), Vec::new()),
-        AgentBackendKind::LmStudio => (String::from("LM Studio"), Vec::new()),
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendKind::PiSdk => {
-            let mut extras = Vec::new();
-            if pi_model_is_openrouter(backend.default_model.as_deref())
-                && let Ok(bucket) =
-                    crate::commands::agent_backends::pi_auth::fetch_pi_openrouter_credit_bucket()
-                        .await
-            {
-                extras.push(bucket);
-            }
-            (String::from("Pi"), extras)
-        }
         // Anthropic-family already handled above; fall through for
         // forward-compat if a new variant is added without a matching
         // dispatch arm.
@@ -154,12 +141,6 @@ pub async fn get_session_usage(
         extra_buckets,
         now_ms,
     ))
-}
-
-fn pi_model_is_openrouter(model: Option<&str>) -> bool {
-    model
-        .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
-        .is_some_and(|provider| provider.eq_ignore_ascii_case("openrouter"))
 }
 
 /// Mirror of the TS-side `CLAUDE_FAMILY_KINDS` in

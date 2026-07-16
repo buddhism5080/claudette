@@ -77,7 +77,7 @@ pub(super) fn backend_models_contain(backend: &AgentBackendConfig, model: &str) 
 /// list — used to decide whether a chat-send re-discovery actually changed
 /// anything worth persisting. Matches the freshness signal in
 /// `runtime_hash` (id + context_window_tokens) so a context-slider change
-/// in LM Studio reliably triggers both a DB write and a gateway respawn.
+/// on a local server reliably triggers both a DB write and a gateway respawn.
 ///
 /// Sorted by model id so the same set of models in a different upstream
 /// order produces the same signature — otherwise a single discovery call
@@ -99,23 +99,15 @@ pub(super) fn apply_discovered_models(
     discovered: Vec<AgentBackendModel>,
 ) {
     // Kinds where a successful discovery pass replaces manual entries:
-    // Ollama / LM Studio / cloud OpenAI / Codex auto-detect the server's
+    // Ollama / cloud OpenAI / Codex auto-detect the server's
     // own model list and the picker is supposed to mirror that source of
     // truth — leaving stale manual rows behind confuses the UI.
-    //
-    // Pi is intentionally excluded: the Pi Settings card surfaces a
-    // manual-models editor for custom-provider rows the user wires up
-    // outside `getAvailable()` (e.g. local Ollama via
-    // `~/.pi/agent/models.json`, internal proxies). Wiping those on
-    // every refresh would silently delete user-entered configuration
-    // and is the regression Codex flagged.
     let clears_manual = matches!(
         backend.kind,
         AgentBackendKind::Ollama
             | AgentBackendKind::OpenAiApi
             | AgentBackendKind::CodexSubscription
             | AgentBackendKind::CodexNative
-            | AgentBackendKind::LmStudio
     );
     if clears_manual && !discovered.is_empty() {
         backend.manual_models.clear();
@@ -440,24 +432,12 @@ pub(super) fn normalize_backend(mut backend: AgentBackendConfig) -> AgentBackend
     if backend.context_window_default == 0 {
         backend.context_window_default = 64_000;
     }
-    #[cfg(feature = "pi-sdk")]
     let model_discovery_kinds = matches!(
         backend.kind,
         AgentBackendKind::Ollama
             | AgentBackendKind::OpenAiApi
             | AgentBackendKind::CodexSubscription
             | AgentBackendKind::CodexNative
-            | AgentBackendKind::PiSdk
-            | AgentBackendKind::LmStudio
-    );
-    #[cfg(not(feature = "pi-sdk"))]
-    let model_discovery_kinds = matches!(
-        backend.kind,
-        AgentBackendKind::Ollama
-            | AgentBackendKind::OpenAiApi
-            | AgentBackendKind::CodexSubscription
-            | AgentBackendKind::CodexNative
-            | AgentBackendKind::LmStudio
     );
     if model_discovery_kinds {
         backend.model_discovery = true;
@@ -497,10 +477,9 @@ pub(super) fn runtime_hash(
     config.id.hash(&mut hasher);
     config.label.hash(&mut hasher);
     backend_kind_hash_key(config.kind).hash(&mut hasher);
-    // The user-selected harness goes into the hash too — flipping
-    // Settings → Models → $(card) → Runtime between Pi and Claude CLI
-    // mid-session must force a respawn, otherwise the live agent keeps
-    // talking to the old subprocess.
+    // The user-selected harness goes into the hash too — flipping a
+    // card's runtime mid-session must force a respawn, otherwise the
+    // live agent keeps talking to the old subprocess.
     harness_hash_key(config.effective_harness()).hash(&mut hasher);
     config.base_url.hash(&mut hasher);
     config.enabled.hash(&mut hasher);
@@ -509,7 +488,7 @@ pub(super) fn runtime_hash(
     model.hash(&mut hasher);
     secret.unwrap_or("").hash(&mut hasher);
     // Fingerprint the per-model context windows so a fresh discovery that
-    // bumps `loaded_context_length` (LM Studio reload with a new slider)
+    // bumps `loaded_context_length` (a local-server reload with a new slider)
     // forces the gateway to respawn with the new snapshot. Without this
     // the gateway's pre-flight check would keep using the stale context
     // size baked into the running task. id+context is enough — label and
@@ -540,11 +519,8 @@ pub(super) fn backend_kind_hash_key(kind: AgentBackendKind) -> &'static str {
         AgentBackendKind::OpenAiApi => "openai_api",
         AgentBackendKind::CodexSubscription => "codex_subscription",
         AgentBackendKind::CodexNative => "codex_native",
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendKind::PiSdk => "pi_sdk",
         AgentBackendKind::CustomAnthropic => "custom_anthropic",
         AgentBackendKind::CustomOpenAi => "custom_openai",
-        AgentBackendKind::LmStudio => "lm_studio",
     }
 }
 
@@ -552,7 +528,5 @@ fn harness_hash_key(harness: AgentBackendRuntimeHarness) -> &'static str {
     match harness {
         AgentBackendRuntimeHarness::ClaudeCode => "claude_code",
         AgentBackendRuntimeHarness::CodexAppServer => "codex_app_server",
-        #[cfg(feature = "pi-sdk")]
-        AgentBackendRuntimeHarness::PiSdk => "pi_sdk",
     }
 }
