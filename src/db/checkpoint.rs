@@ -796,9 +796,9 @@ impl Database {
                     result_text, summary, sort_order, assistant_message_ordinal,
                     agent_task_id, agent_description, agent_last_tool_name,
                     agent_tool_use_count, agent_status, agent_tool_calls_json,
-                    agent_thinking_blocks_json, agent_result_text
+                    agent_thinking_blocks_json, agent_result_text, workflow_progress_json
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             )?;
             for a in activities {
                 stmt.execute(params![
@@ -819,6 +819,7 @@ impl Database {
                     a.agent_tool_calls_json,
                     a.agent_thinking_blocks_json,
                     a.agent_result_text,
+                    a.workflow_progress_json,
                 ])?;
             }
         }
@@ -857,9 +858,9 @@ impl Database {
                     result_text, summary, sort_order, assistant_message_ordinal,
                     agent_task_id, agent_description, agent_last_tool_name,
                     agent_tool_use_count, agent_status, agent_tool_calls_json,
-                    agent_thinking_blocks_json, agent_result_text
+                    agent_thinking_blocks_json, agent_result_text, workflow_progress_json
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             )?;
             for a in activities {
                 stmt.execute(params![
@@ -880,11 +881,47 @@ impl Database {
                     a.agent_tool_calls_json,
                     a.agent_thinking_blocks_json,
                     a.agent_result_text,
+                    a.workflow_progress_json,
                 ])?;
             }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Update the persisted workflow progress tree (and agent status) for a
+    /// single already-saved tool activity, addressed by `tool_use_id`.
+    ///
+    /// Exists because a `Workflow` run routinely outlives the turn that
+    /// launched it: the tool returns "launched in background" within a
+    /// second, the agent finishes its turn, and the run keeps going for
+    /// minutes before its task-notification arrives. By then the activity
+    /// has already been written by `save_turn_tool_activities`, so the
+    /// final tree has nowhere to land without a targeted update.
+    ///
+    /// Returns the number of rows updated — zero is normal and not an
+    /// error (the activity may belong to a session whose turn was never
+    /// checkpointed).
+    pub fn update_turn_tool_activity_progress(
+        &self,
+        tool_use_id: &str,
+        workflow_progress_json: Option<&str>,
+        agent_status: Option<&str>,
+    ) -> Result<usize, rusqlite::Error> {
+        // COALESCE on both columns keeps the stored value when the caller
+        // has nothing better to say, so neither field can be blanked by an
+        // update that only knows about the other. Status-only updates are
+        // the reason the tree is optional: a run that ends without ever
+        // reporting agents still has to resolve its status, and passing
+        // `None` there must not overwrite a tree the run did report.
+        self.conn.execute(
+            "UPDATE turn_tool_activities
+                SET workflow_progress_json =
+                        COALESCE(?1, workflow_progress_json),
+                    agent_status = COALESCE(?2, agent_status)
+              WHERE tool_use_id = ?3",
+            params![workflow_progress_json, agent_status, tool_use_id],
+        )
     }
 
     /// Load all completed turns for a workspace: checkpoints joined with their
@@ -903,7 +940,7 @@ impl Database {
                     ta.assistant_message_ordinal, ta.agent_task_id,
                     ta.agent_description, ta.agent_last_tool_name,
                     ta.agent_tool_use_count, ta.agent_status, ta.agent_tool_calls_json,
-                    ta.agent_thinking_blocks_json, ta.agent_result_text
+                    ta.agent_thinking_blocks_json, ta.agent_result_text, ta.workflow_progress_json
              FROM turn_tool_activities ta
              JOIN conversation_checkpoints cp ON ta.checkpoint_id = cp.id
              WHERE cp.workspace_id = ?1
@@ -929,6 +966,7 @@ impl Database {
                     agent_tool_calls_json: row.get(14)?,
                     agent_thinking_blocks_json: row.get(15)?,
                     agent_result_text: row.get(16)?,
+                    workflow_progress_json: row.get(17)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1012,7 +1050,7 @@ impl Database {
                     ta.assistant_message_ordinal, ta.agent_task_id,
                     ta.agent_description, ta.agent_last_tool_name,
                     ta.agent_tool_use_count, ta.agent_status, ta.agent_tool_calls_json,
-                    ta.agent_thinking_blocks_json, ta.agent_result_text
+                    ta.agent_thinking_blocks_json, ta.agent_result_text, ta.workflow_progress_json
              FROM turn_tool_activities ta
              JOIN conversation_checkpoints cp ON ta.checkpoint_id = cp.id
              WHERE cp.chat_session_id = ?1
@@ -1038,6 +1076,7 @@ impl Database {
                     agent_tool_calls_json: row.get(14)?,
                     agent_thinking_blocks_json: row.get(15)?,
                     agent_result_text: row.get(16)?,
+                    workflow_progress_json: row.get(17)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1122,6 +1161,7 @@ mod tests {
             agent_tool_calls_json: "[]".into(),
             agent_thinking_blocks_json: "[]".into(),
             agent_result_text: None,
+            workflow_progress_json: "[]".into(),
         }
     }
 
@@ -1392,6 +1432,92 @@ mod tests {
         assert_eq!(turns[0].activities.len(), 2);
         assert_eq!(turns[1].activities.len(), 1);
         assert_eq!(turns[1].activities[0].tool_name, "Bash");
+    }
+
+    /// A backgrounded `Workflow` finishes long after its turn was saved, so
+    /// the final tree has to be written straight at the activity row.
+    #[test]
+    fn test_update_turn_tool_activity_progress_writes_tree_and_status() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+            .unwrap();
+        db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
+            .unwrap();
+        db.insert_turn_tool_activities(&[make_tool_activity("a1", "cp1", "Workflow", 0)])
+            .unwrap();
+
+        let tree = r#"[{"type":"workflow_agent","index":1,"label":"review","state":"done"}]"#;
+        let updated = db
+            .update_turn_tool_activity_progress("tu_a1", Some(tree), Some("completed"))
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let turns = db.list_completed_turns("w1").unwrap();
+        let activity = &turns[0].activities[0];
+        assert_eq!(activity.workflow_progress_json, tree);
+        assert_eq!(activity.agent_status.as_deref(), Some("completed"));
+    }
+
+    /// `COALESCE` on the status column: a progress-only update must not
+    /// blank a status a prior notification already resolved.
+    #[test]
+    fn test_update_turn_tool_activity_progress_preserves_status_when_none() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+            .unwrap();
+        db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
+            .unwrap();
+        db.insert_turn_tool_activities(&[make_tool_activity("a1", "cp1", "Workflow", 0)])
+            .unwrap();
+
+        db.update_turn_tool_activity_progress("tu_a1", Some("[]"), Some("completed"))
+            .unwrap();
+        db.update_turn_tool_activity_progress("tu_a1", Some(r#"[{"type":"Unknown"}]"#), None)
+            .unwrap();
+
+        let turns = db.list_completed_turns("w1").unwrap();
+        assert_eq!(
+            turns[0].activities[0].agent_status.as_deref(),
+            Some("completed")
+        );
+    }
+
+    /// `COALESCE` on the tree column: a status-only update must not blank a
+    /// tree the run already reported. This is the terminal-notification
+    /// path — the CLI never carries `workflow_progress` on
+    /// `task_notification`, so a run whose store entry has no tree resolves
+    /// its status with `None` here and the stored tree has to survive.
+    #[test]
+    fn test_update_turn_tool_activity_progress_preserves_tree_when_none() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+            .unwrap();
+        db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
+            .unwrap();
+        db.insert_turn_tool_activities(&[make_tool_activity("a1", "cp1", "Workflow", 0)])
+            .unwrap();
+
+        let tree = r#"[{"type":"workflow_agent","index":1,"label":"review","state":"done"}]"#;
+        db.update_turn_tool_activity_progress("tu_a1", Some(tree), None)
+            .unwrap();
+        db.update_turn_tool_activity_progress("tu_a1", None, Some("failed"))
+            .unwrap();
+
+        let turns = db.list_completed_turns("w1").unwrap();
+        let activity = &turns[0].activities[0];
+        assert_eq!(activity.workflow_progress_json, tree);
+        assert_eq!(activity.agent_status.as_deref(), Some("failed"));
+    }
+
+    /// An unknown `tool_use_id` is normal (the turn may never have been
+    /// checkpointed), so it reports zero rows rather than erroring.
+    #[test]
+    fn test_update_turn_tool_activity_progress_unknown_id_is_not_an_error() {
+        let db = setup_db_with_workspace();
+        let updated = db
+            .update_turn_tool_activity_progress("tu_missing", Some("[]"), Some("completed"))
+            .unwrap();
+        assert_eq!(updated, 0);
     }
 
     #[test]

@@ -8,6 +8,7 @@ import type {
 import type { StoredAttachment } from "../../types/chat";
 import { debugChat } from "../../utils/chatDebug";
 import type { CompactionEvent } from "../../utils/compactionSentinel";
+import type { WorkflowProgressEntry } from "../../types/workflow";
 import type { AppState } from "../useAppStore";
 
 export interface ToolActivity {
@@ -27,6 +28,10 @@ export interface ToolActivity {
   agentToolCalls?: AgentToolCall[];
   agentThinkingBlocks?: string[];
   agentResultText?: string | null;
+  /** Phase/agent tree for a `Workflow` tool activity. Undefined for every
+   *  other tool, and also for a workflow whose first progress tick hasn't
+   *  landed yet. */
+  workflowProgress?: WorkflowProgressEntry[];
 }
 
 export interface AgentToolCall {
@@ -469,14 +474,57 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
       },
     })),
   updateToolActivity: (sessionId, toolUseId, updates) =>
-    set((s) => ({
-      toolActivities: {
-        ...s.toolActivities,
-        [sessionId]: (s.toolActivities[sessionId] || []).map((a) =>
-          a.toolUseId === toolUseId ? { ...a, ...updates } : a,
-        ),
-      },
-    })),
+    set((s) => {
+      const live = s.toolActivities[sessionId] || [];
+      if (live.some((a) => a.toolUseId === toolUseId)) {
+        return {
+          toolActivities: {
+            ...s.toolActivities,
+            [sessionId]: live.map((a) =>
+              a.toolUseId === toolUseId ? { ...a, ...updates } : a,
+            ),
+          },
+        };
+      }
+
+      // Not in the live turn. Normally that means the update is for an
+      // activity we've already forgotten and there's nothing to do — but a
+      // backgrounded `Workflow` breaks that assumption: its tool_result
+      // ("launched in background") arrives within a second, the agent
+      // finishes its turn, and the run keeps emitting `task_progress` for
+      // minutes afterwards. Those updates arrive after `finalizeTurn` has
+      // moved the activity into `completedTurns`, so without this fallback
+      // the card would freeze at whatever the tree looked like when the
+      // turn ended and never show the run completing.
+      //
+      // Searched newest-first because `toolUseId` is unique per turn and
+      // the relevant activity is almost always in the most recent one.
+      // Purely additive: today these updates are silently dropped, so no
+      // currently-working path changes behavior.
+      // Return the existing state (not `{}`) on every miss below. Zustand
+      // shallow-merges whatever a `set` updater returns, so `{}` still
+      // produces a fresh top-level state object and fires every listener;
+      // returning `s` is `Object.is`-equal and a true no-op. These misses
+      // are the common case — most `updateToolActivity` calls that reach
+      // here are progress ticks for a workflow whose turn is still live and
+      // matched above, or for activities not in this session at all.
+      const turns = s.completedTurns[sessionId];
+      if (!turns) return s;
+      for (let i = turns.length - 1; i >= 0; i--) {
+        const idx = turns[i].activities.findIndex(
+          (a) => a.toolUseId === toolUseId,
+        );
+        if (idx < 0) continue;
+        const nextTurns = [...turns];
+        const nextActivities = [...turns[i].activities];
+        nextActivities[idx] = { ...nextActivities[idx], ...updates };
+        nextTurns[i] = { ...turns[i], activities: nextActivities };
+        return {
+          completedTurns: { ...s.completedTurns, [sessionId]: nextTurns },
+        };
+      }
+      return s;
+    }),
   upsertAgentToolCall: (sessionId, agentId, call) => {
     let matched = false;
     set((s) => {
@@ -585,6 +633,7 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
           agentToolCalls: a.agentToolCalls,
           agentThinkingBlocks: a.agentThinkingBlocks,
           agentResultText: a.agentResultText,
+          workflowProgress: a.workflowProgress,
         })),
         messageCount,
         collapsed: true,

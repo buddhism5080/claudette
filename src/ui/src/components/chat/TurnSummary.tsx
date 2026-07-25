@@ -8,8 +8,9 @@ import { TaskProgressBar } from "./TaskProgressBar";
 import { activityMatchesSearch } from "./agentToolCallRendering";
 import { toolColor } from "./chatHelpers";
 import { AgentToolCallGroup } from "./AgentToolCallGroup";
+import { WorkflowCard } from "./WorkflowCard";
 import { ToolActivityRow } from "./ToolActivityRow";
-import { isAgentActivity } from "./toolActivityGroups";
+import { isAgentActivity, isWorkflowActivity } from "./toolActivityGroups";
 import { TurnEditSummaryCard } from "./EditChangeSummary";
 import {
   type EditPreviewLine,
@@ -17,15 +18,15 @@ import {
   summarizeTurnEdits,
 } from "./editActivitySummary";
 
-/// Split the leading "Agent" / "Skill" prefix on a turn label into a
-/// colored span so the finalized summary matches the accent color used
-/// while the turn was still running. Handles three label shapes:
-///   • bare  — "Agent" / "Skill"
-///   • prefixed — "Agent <description>" / "Skill <description>"
+/// Split the leading "Agent" / "Skill" / "Workflow" prefix on a turn label
+/// into a colored span so the finalized summary matches the accent color
+/// used while the turn was still running. Handles three label shapes:
+///   • bare  — "Agent" / "Skill" / "Workflow"
+///   • prefixed — "Agent <description>" / "Workflow <name>"
 ///   • anything else — rendered untouched
 /// Kept inline rather than promoted to a helper module — the only
 /// other consumer of `toolColor` already lives in TurnSummary.
-const COLORED_PREFIX = /^(Agent|Skill)(?:\s+(.+))?$/;
+const COLORED_PREFIX = /^(Agent|Skill|Workflow)(?:\s+(.+))?$/;
 function renderTurnLabel(label: string) {
   const match = COLORED_PREFIX.exec(label);
   if (!match) return label;
@@ -132,7 +133,37 @@ export function TurnSummary({
       activityMatchesSearch(activity, searchQuery, worktreePath),
     );
   const isExpanded = inline || !collapsed || queryHasMatch;
+
+  // In grouped mode a workflow is always a group of exactly one activity
+  // (`groupToolActivitiesForDisplay` gives it its own group), and the card it
+  // renders already owns a header, chevron, and progress rail. So hand this
+  // group's `collapsed`/`onToggle` to the card rather than spending them on
+  // the generic TurnSummary chevron.
+  //
+  // That keeps one chevron on screen instead of two, but the real reason is
+  // that `workflow:<toolUseId>` is shared with the live card on purpose (see
+  // `collapsedToolGroupKey`) — and wrapping made the key mean two different
+  // things across the running→completed boundary. While live, collapse hid
+  // only the agent tree and kept the header/rail; once the turn ended the
+  // TurnSummary chevron unmounted the whole card, so the final agent count,
+  // failure badge, and token total silently disappeared — exactly the summary
+  // a user collapsing a finished run wants to keep. Forwarding makes collapse
+  // mean "hide the agent tree" on both sides.
+  const soleActivity =
+    visibleActivities.length === 1 ? visibleActivities[0] : undefined;
+  const workflowCollapseOwner =
+    !inline && soleActivity && isWorkflowActivity(soleActivity)
+      ? soleActivity
+      : null;
+
   const renderedActivities = visibleActivities.map((act: ToolActivity) => {
+    if (isWorkflowActivity(act)) {
+      // Reached only in inline display mode (grouped mode routes the card
+      // through `workflowCollapseOwner` above). Inline mode renders every
+      // activity flush with no enclosing chevron, so the card has no collapse
+      // affordance to inherit and stays expanded.
+      return <WorkflowCard key={act.toolUseId} activity={act} inline />;
+    }
     if (isAgentActivity(act)) {
       return (
         <AgentToolCallGroup
@@ -159,7 +190,15 @@ export function TurnSummary({
 
   return (
     <div className={styles.turnSummaryWrapper}>
-      {inline ? (
+      {workflowCollapseOwner ? (
+        <div className={styles.inlineTurnActivities}>
+          <WorkflowCard
+            activity={workflowCollapseOwner}
+            collapsed={!isExpanded}
+            onToggle={onToggle}
+          />
+        </div>
+      ) : inline ? (
         <div className={styles.inlineTurnActivities}>{renderedActivities}</div>
       ) : (
         <div className={styles.turnSummary}>

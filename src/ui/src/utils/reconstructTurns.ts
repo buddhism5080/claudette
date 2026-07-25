@@ -1,6 +1,10 @@
 import type { CompletedTurn } from "../stores/useAppStore";
 import type { ChatMessage } from "../types/chat";
 import type { CompletedTurnData } from "../types/checkpoint";
+import {
+  isWorkflowProgressEntry,
+  type WorkflowProgressEntry,
+} from "../types/workflow";
 import { debugChat } from "./chatDebug";
 
 /**
@@ -94,6 +98,7 @@ export function reconstructCompletedTurns(
         agentToolCalls: parseAgentToolCalls(a.agent_tool_calls_json),
         agentThinkingBlocks: parseStringArray(a.agent_thinking_blocks_json),
         agentResultText: a.agent_result_text,
+        workflowProgress: parseWorkflowProgress(a.workflow_progress_json),
       })),
       messageCount: td.message_count,
       collapsed: true,
@@ -113,6 +118,40 @@ function parseAgentToolCalls(value: string | null | undefined) {
   try {
     const parsed = JSON.parse(value);
     return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Rehydrate a persisted `Workflow` progress tree.
+ *
+ *  Returns `undefined` rather than `[]` when nothing valid is stored, so
+ *  "no tree was ever recorded" stays distinguishable from "a tree that
+ *  reported no agents". Rendering does not need that distinction —
+ *  `summarizeWorkflowProgress` coerces both to the same empty summary, and
+ *  whether a card renders at all is decided by `toolName === "Workflow"`
+ *  (`isWorkflowActivity`), not by this field.
+ *
+ *  The terminal-notification write in `useAgentStream` is what needs it:
+ *  it sends `null` for an absent tree so the stored column is COALESCEd
+ *  instead of overwritten with `"[]"`. Collapsing the two here would let a
+ *  run whose activity was rehydrated without a tree blank the good row that
+ *  a prior write had already put in the database.
+ *
+ *  Entries are filtered through `isWorkflowProgressEntry`, which admits only
+ *  the kinds the union models — including `Unknown`, which Rust writes for
+ *  any incoming kind it doesn't recognize. Anything else in the column is
+ *  foreign or corrupt data and is dropped here rather than being asserted
+ *  into the type and skipped later by each consumer in turn. */
+function parseWorkflowProgress(
+  value: string | null | undefined,
+): WorkflowProgressEntry[] | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+    const entries = parsed.filter(isWorkflowProgressEntry);
+    return entries.length > 0 ? entries : undefined;
   } catch {
     return undefined;
   }

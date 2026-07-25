@@ -1,9 +1,11 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "../stores/useAppStore";
+import { findToolActivity } from "../stores/findToolActivity";
 import {
   loadChatHistory,
   saveTurnToolActivities,
+  updateTurnToolActivityProgress,
   setSessionCliInvocation,
 } from "../services/tauri";
 import type { AgentStreamPayload } from "../types/agent-events";
@@ -319,12 +321,76 @@ export function useAgentStream() {
               if (typeof streamEvent.usage?.tool_uses === "number") {
                 updates.agentToolUseCount = streamEvent.usage.tool_uses;
               }
+              // Full replacement snapshot of a Workflow run's phase/agent
+              // tree. The CLI only attaches it on real state transitions;
+              // the throttled in-between ticks omit the key entirely, and
+              // that absence means "unchanged". Assigning unconditionally
+              // would blank the card every ~10s mid-run, so only touch
+              // `workflowProgress` when the key is actually present.
+              if (Array.isArray(streamEvent.workflow_progress)) {
+                updates.workflowProgress = streamEvent.workflow_progress;
+              }
               if (streamEvent.status) {
                 updates.agentStatus = streamEvent.status;
               } else if (streamEvent.subtype === "task_progress") {
                 updates.agentStatus = "running";
               }
               updateToolActivity(sessionId, streamEvent.tool_use_id, updates);
+              // A backgrounded Workflow usually finishes after the turn
+              // that launched it has already been checkpointed, so its
+              // final tree has nowhere to land — `save_turn_tool_activities`
+              // ran minutes ago, writing `"[]"` and a null status because
+              // the tool_result ("launched in background") arrives within a
+              // second of launch, before any progress exists. Write the
+              // finished state directly at the activity row instead.
+              //
+              // Read the tree back out of the store rather than off this
+              // event: the CLI attaches `workflow_progress` to `task_progress`
+              // ONLY — its `task_notification` payload carries just
+              // `task_id` / `tool_use_id` / `status` / `output_file` /
+              // `summary` / `usage`, with no tree on any code path. Gating
+              // this write on the event carrying one therefore never fired,
+              // leaving every finished run to replay as "Starting workflow…"
+              // behind a status pill that spun forever.
+              //
+              // The store is the right source: `updateToolActivity` above has
+              // already applied the terminal status, and the last
+              // `task_progress` tick left the completed tree there. By now
+              // the activity has migrated into `completedTurns`, so the
+              // lookup has to check both places — hence `findToolActivity`.
+              //
+              // Still only on the terminal notification, not on every tick:
+              // one write per run instead of dozens, and the completed state
+              // is what replay actually needs.
+              if (streamEvent.subtype === "task_notification") {
+                const activity = findToolActivity(
+                  useAppStore.getState(),
+                  sessionId,
+                  streamEvent.tool_use_id,
+                );
+                // Persist for workflows even when no tree was ever reported
+                // (a run that failed before its first `task_progress`): the
+                // terminal status alone still has to land, or the pill keeps
+                // spinning. `null` leaves the stored tree untouched in that
+                // case rather than blanking it — both columns COALESCE.
+                // `agentStatus` is read back off the activity so a
+                // notification without an explicit `status` still writes
+                // whatever the store settled on.
+                if (activity?.toolName === "Workflow") {
+                  void updateTurnToolActivityProgress(
+                    streamEvent.tool_use_id,
+                    activity.workflowProgress
+                      ? JSON.stringify(activity.workflowProgress)
+                      : null,
+                    activity.agentStatus ?? null,
+                  ).catch((err) => {
+                    debugChat("stream", "persist workflow progress failed", {
+                      toolUseId: streamEvent.tool_use_id,
+                      error: String(err),
+                    });
+                  });
+                }
+              }
               if (streamEvent.task_id) {
                 const pending = pendingAgentToolCallsRef.current[streamEvent.task_id] || [];
                 const remaining = pending.filter(
@@ -1011,6 +1077,7 @@ export function useAgentStream() {
                 a.agentThinkingBlocks ?? [],
               ),
               agent_result_text: a.agentResultText ?? null,
+              workflow_progress_json: JSON.stringify(a.workflowProgress ?? []),
             }));
             return saveTurnToolActivities(checkpoint.id, messageCount, activities);
           })()
