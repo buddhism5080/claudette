@@ -17,6 +17,7 @@ use claudette::plugin::load_secure_secret;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::auto_detect::auto_detect_disabled_key;
 use super::codex_gate::{
     LEGACY_CODEX_SUBSCRIPTION_BACKEND_ID, LEGACY_NATIVE_CODEX_BACKEND_ID, NATIVE_CODEX_BACKEND_ID,
     codex_backend_hidden_by_gate, default_backends_for_gate, is_codex_gate_backend_id,
@@ -26,6 +27,37 @@ use super::codex_gate::{
 pub(super) const SETTINGS_KEY: &str = "agent_backends_config";
 pub(super) const SECRET_BUCKET: &str = "agentBackendSecrets";
 const BACKEND_RUNTIME_ENV_VERSION: u8 = 2;
+
+/// Backend `kind` values that shipped in an earlier build and have since
+/// been removed for good (Pi + LM Studio, dropped in #1007).
+///
+/// These are deliberately *not* treated like an unrecognized kind from a
+/// newer build. The unknown-entry path assumes forward compatibility — it
+/// warns the user and preserves the entry so it revives on a build that
+/// understands it. No such build is coming for these, so a stored entry is
+/// simply dead config: the tolerant loader skips it without a user-visible
+/// warning, [`read_unknown_passthrough`] stops splicing it back on save,
+/// and [`purge_retired_backend_settings`] removes it from the stored blob.
+const RETIRED_BACKEND_KINDS: &[&str] = &["pi_sdk", "lm_studio"];
+
+/// Backend ids that belonged to [`RETIRED_BACKEND_KINDS`]. Tracked
+/// separately because id-keyed settings (`default_agent_backend`, the
+/// auto-detect opt-out keys) never record a `kind`.
+const RETIRED_BACKEND_IDS: &[&str] = &["pi", "lm-studio"];
+
+/// True when a stored JSON entry carries a retired `kind`. Reads the raw
+/// value rather than a parsed config because retired kinds are exactly the
+/// ones this build can no longer deserialize.
+fn is_retired_backend_entry(entry: &Value) -> bool {
+    entry
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| RETIRED_BACKEND_KINDS.contains(&kind))
+}
+
+fn is_retired_backend_id(id: &str) -> bool {
+    RETIRED_BACKEND_IDS.contains(&id)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendStatus {
@@ -179,6 +211,18 @@ pub(super) fn load_backend_configs_tolerant(db: &Database) -> Result<LoadedBacke
                                 .get("kind")
                                 .and_then(Value::as_str)
                                 .unwrap_or("<no kind>");
+                            // Retired kinds are dead config, not a
+                            // forward-compat entry — nothing for the user
+                            // to act on, so no warning. `list_agent_backends`
+                            // purges them from storage on the next load.
+                            if is_retired_backend_entry(&entry) {
+                                tracing::debug!(
+                                    target: "agent_backends",
+                                    id, kind,
+                                    "tolerant load: dropping retired backend entry"
+                                );
+                                continue;
+                            }
                             warnings.push(format!(
                                 "Skipped backend entry id=`{id}` kind=`{kind}`: {err}. \
                                  Entry preserved and will be reapplied on a build that supports it."
@@ -232,6 +276,17 @@ pub(super) fn resolve_backend_list_default(
     if backends.iter().any(|backend| backend.id == aliased_default) {
         return aliased_default;
     }
+    // A default pointing at a retired backend isn't a config the user can
+    // repair by switching builds — fall back silently and let
+    // `purge_retired_backend_settings` clear the stored key.
+    if is_retired_backend_id(&stored_default) {
+        tracing::debug!(
+            target: "agent_backends",
+            stored_default = %stored_default,
+            "default backend setting points at a retired backend; using anthropic"
+        );
+        return "anthropic".to_string();
+    }
     warnings.push(format!(
         "Default backend `{stored_default}` is not available in this build; \
          falling back to `anthropic` for this session. \
@@ -268,8 +323,123 @@ pub(super) fn read_unknown_passthrough(db: &Database) -> Result<Vec<Value>, Stri
     };
     Ok(entries
         .into_iter()
-        .filter(|entry| serde_json::from_value::<AgentBackendConfig>(entry.clone()).is_err())
+        .filter(|entry| {
+            // Retired kinds are excluded from passthrough on purpose: they
+            // are unparseable here and always will be, so preserving them
+            // would carry dead config forward on every write.
+            !is_retired_backend_entry(entry)
+                && serde_json::from_value::<AgentBackendConfig>(entry.clone()).is_err()
+        })
         .collect())
+}
+
+/// Drop every trace of a retired backend from persisted settings: the
+/// entry in the backend blob, a `default_agent_backend` still pointing at
+/// it, and its auto-detect opt-out key.
+///
+/// Called from `list_agent_backends` (which runs at app boot and whenever
+/// the Models panel mounts) so the cleanup is deterministic rather than
+/// waiting for the user's next backend edit. Self-limiting: once the
+/// retired entries are gone there is nothing to rewrite, so it stops
+/// touching the DB. Surviving entries are re-persisted from their raw
+/// JSON, never a reparse, so unrelated unknown-kind passthrough and any
+/// additive fields written by a newer build survive untouched.
+///
+/// An unreadable blob makes this a whole no-op, including the id-keyed
+/// settings — see the state table in the body for why.
+///
+/// A DB write failure is returned to the caller rather than swallowed —
+/// the alternative is silently reintroducing the warning-free-but-still-
+/// stored state this is meant to clear.
+pub(super) fn purge_retired_backend_settings(db: &Database) -> Result<(), String> {
+    // The stored blob has three states, and only two are safe to act on:
+    //
+    //   key absent          -> known-empty. Nothing is stored, so an
+    //                          id-keyed setting naming a retired backend
+    //                          is a genuine orphan and can go.
+    //   key present, parses -> known. `live_ids` below is trustworthy.
+    //   key present, corrupt-> unknown. Bail out entirely.
+    //
+    // The corrupt case must not fall through to the id-keyed purge: an
+    // empty `live_ids` there means "couldn't read", not "nothing claims
+    // this id", which would defeat the collision guard below and delete
+    // the default selection of a user-defined backend still sitting in
+    // that unreadable JSON. Repairing a corrupt blob is
+    // `save_backend_configs`' job — the tolerant loader deliberately
+    // leaves it in place for external recovery, so this pass leaves every
+    // related setting alone until the blob is readable again.
+    let Some(raw) = db
+        .get_app_setting(SETTINGS_KEY)
+        .map_err(|e| e.to_string())?
+    else {
+        return purge_retired_id_keyed_settings(db, &HashSet::new());
+    };
+    let Ok(stored) = serde_json::from_str::<Vec<Value>>(&raw) else {
+        tracing::warn!(
+            target: "agent_backends",
+            "skipping retired-backend purge: stored blob is unreadable"
+        );
+        return Ok(());
+    };
+
+    if stored.iter().any(is_retired_backend_entry) {
+        let kept: Vec<&Value> = stored
+            .iter()
+            .filter(|entry| !is_retired_backend_entry(entry))
+            .collect();
+        let cleaned = serde_json::to_string(&kept).map_err(|e| e.to_string())?;
+        db.set_app_setting(SETTINGS_KEY, &cleaned)
+            .map_err(|e| e.to_string())?;
+        tracing::info!(
+            target: "agent_backends",
+            "purged retired backend entries from stored settings"
+        );
+    }
+
+    let live_ids: HashSet<&str> = stored
+        .iter()
+        .filter(|entry| !is_retired_backend_entry(entry))
+        .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+        .collect();
+    purge_retired_id_keyed_settings(db, &live_ids)
+}
+
+/// Clear the id-keyed settings (`default_agent_backend`, the auto-detect
+/// opt-out) belonging to a retired backend.
+///
+/// `live_ids` must be the set of ids the *readable* stored blob still
+/// claims — a retired id is not reserved, so nothing stops a user-defined
+/// backend from also being called `pi`, and any id in this set is spared.
+/// Callers must never pass an empty set to mean "couldn't read the blob";
+/// see [`purge_retired_backend_settings`].
+fn purge_retired_id_keyed_settings(db: &Database, live_ids: &HashSet<&str>) -> Result<(), String> {
+    let purgeable_ids: Vec<&str> = RETIRED_BACKEND_IDS
+        .iter()
+        .copied()
+        .filter(|id| !live_ids.contains(id))
+        .collect();
+
+    if db
+        .get_app_setting("default_agent_backend")
+        .map_err(|e| e.to_string())?
+        .is_some_and(|stored| purgeable_ids.contains(&stored.as_str()))
+    {
+        db.delete_app_setting("default_agent_backend")
+            .map_err(|e| e.to_string())?;
+    }
+
+    for id in purgeable_ids {
+        let key = auto_detect_disabled_key(id);
+        if db
+            .get_app_setting(&key)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            db.delete_app_setting(&key).map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
 }
 
 pub(super) fn canonical_backend_id(id: &str) -> &str {

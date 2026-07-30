@@ -52,7 +52,7 @@ pub use config::{BackendListResponse, BackendSecretUpdate, BackendStatus};
 use config::{
     SECRET_BUCKET, apply_discovered_models, canonical_backend_id, find_backend,
     load_backend_configs, load_backend_configs_tolerant, normalize_backend,
-    resolve_backend_list_default, save_backend_configs,
+    purge_retired_backend_settings, resolve_backend_list_default, save_backend_configs,
 };
 use discovery::{codex_cli_command, discover_models, test_backend_connectivity};
 
@@ -71,6 +71,7 @@ pub async fn list_agent_backends(
     state: State<'_, AppState>,
 ) -> Result<BackendListResponse, String> {
     let db = Database::open(&state.db_path).map_err(|e| e.to_string())?;
+    purge_retired_backend_settings(&db)?;
     let stored_default = db
         .get_app_setting("default_agent_backend")
         .map_err(|e| e.to_string())?
@@ -1102,6 +1103,272 @@ mod tests {
             warning.contains("future-thing") && warning.contains("totally_new_backend"),
             "warning should name the offending entry: {warning}"
         );
+    }
+
+    /// Seed the stored blob with the two retired kinds plus a genuinely
+    /// unknown one, so every assertion can check that "retired" and
+    /// "unknown" stay on different code paths.
+    fn seed_retired_and_unknown_entries(db: &Database) {
+        let raw = serde_json::Value::Array(vec![
+            json!({ "id": "pi", "label": "Pi", "kind": "pi_sdk", "enabled": true }),
+            json!({ "id": "lm-studio", "label": "LM Studio", "kind": "lm_studio", "enabled": true }),
+            json!({ "id": "future-thing", "label": "Future", "kind": "totally_new_backend" }),
+        ]);
+        db.set_app_setting(SETTINGS_KEY, &raw.to_string())
+            .expect("seed should save");
+    }
+
+    #[test]
+    fn tolerant_load_drops_retired_kinds_without_warning() {
+        // Pi / LM Studio were removed for good, so a stored entry is dead
+        // config rather than a forward-compat passthrough. It must not
+        // raise the "some saved backend entries weren't loaded" banner —
+        // there is no build coming that would revive it. A genuinely
+        // unknown kind in the same blob must still warn.
+        let db = Database::open_in_memory().expect("test db should open");
+        seed_retired_and_unknown_entries(&db);
+
+        let loaded = load_backend_configs_tolerant(&db).expect("tolerant load should succeed");
+
+        assert!(!loaded.backends.iter().any(|b| b.id == "pi"));
+        assert!(!loaded.backends.iter().any(|b| b.id == "lm-studio"));
+        assert_eq!(
+            loaded.warnings.len(),
+            1,
+            "only the unknown kind should warn: {:?}",
+            loaded.warnings
+        );
+        assert!(loaded.warnings[0].contains("future-thing"));
+
+        // Retired kinds are excluded from passthrough; the unknown one is not.
+        let passthrough = read_unknown_passthrough(&db).expect("passthrough read should succeed");
+        assert_eq!(passthrough.len(), 1);
+        assert_eq!(
+            passthrough[0].get("id").and_then(Value::as_str),
+            Some("future-thing")
+        );
+    }
+
+    #[test]
+    fn save_drops_retired_kinds_but_keeps_unknown_passthrough() {
+        let db = Database::open_in_memory().expect("test db should open");
+        seed_retired_and_unknown_entries(&db);
+
+        let mut ollama = AgentBackendConfig::builtin_ollama();
+        ollama.enabled = true;
+        save_backend_configs(&db, &[ollama]).expect("save should succeed");
+
+        let raw = db
+            .get_app_setting(SETTINGS_KEY)
+            .expect("read should succeed")
+            .expect("blob should exist");
+        let entries: Vec<Value> = serde_json::from_str(&raw).expect("blob should parse");
+        let ids: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+            .collect();
+        assert!(ids.contains(&"ollama"));
+        assert!(
+            ids.contains(&"future-thing"),
+            "unknown kind still preserved"
+        );
+        assert!(!ids.contains(&"pi"));
+        assert!(!ids.contains(&"lm-studio"));
+    }
+
+    #[test]
+    fn purge_retired_backend_settings_clears_every_stored_trace() {
+        let db = Database::open_in_memory().expect("test db should open");
+        seed_retired_and_unknown_entries(&db);
+        db.set_app_setting("default_agent_backend", "pi")
+            .expect("default should save");
+        db.set_app_setting(&auto_detect_disabled_key("lm-studio"), "true")
+            .expect("opt-out should save");
+
+        purge_retired_backend_settings(&db).expect("purge should succeed");
+
+        let raw = db
+            .get_app_setting(SETTINGS_KEY)
+            .expect("read should succeed")
+            .expect("blob should exist");
+        let entries: Vec<Value> = serde_json::from_str(&raw).expect("blob should parse");
+        assert_eq!(entries.len(), 1, "only the unknown entry survives");
+        assert_eq!(
+            entries[0].get("id").and_then(Value::as_str),
+            Some("future-thing")
+        );
+        assert_eq!(
+            db.get_app_setting("default_agent_backend")
+                .expect("read should succeed"),
+            None
+        );
+        assert_eq!(
+            db.get_app_setting(&auto_detect_disabled_key("lm-studio"))
+                .expect("read should succeed"),
+            None
+        );
+
+        // Idempotent: a second pass has nothing left to rewrite.
+        purge_retired_backend_settings(&db).expect("second purge should succeed");
+        let after = db
+            .get_app_setting(SETTINGS_KEY)
+            .expect("read should succeed")
+            .expect("blob should exist");
+        assert_eq!(after, raw);
+    }
+
+    #[test]
+    fn purge_leaves_unrelated_settings_alone() {
+        let db = Database::open_in_memory().expect("test db should open");
+        let mut ollama = AgentBackendConfig::builtin_ollama();
+        ollama.enabled = true;
+        save_backend_configs(&db, &[ollama]).expect("save should succeed");
+        db.set_app_setting("default_agent_backend", "ollama")
+            .expect("default should save");
+        let before = db
+            .get_app_setting(SETTINGS_KEY)
+            .expect("read should succeed");
+
+        purge_retired_backend_settings(&db).expect("purge should succeed");
+
+        assert_eq!(
+            db.get_app_setting(SETTINGS_KEY)
+                .expect("read should succeed"),
+            before
+        );
+        assert_eq!(
+            db.get_app_setting("default_agent_backend")
+                .expect("read should succeed"),
+            Some("ollama".to_string())
+        );
+    }
+
+    #[test]
+    fn purge_spares_a_live_backend_that_reuses_a_retired_id() {
+        // `pi` is a dead *kind*, not a reserved *id*. A user-defined
+        // backend is free to be named `pi`, and the id-keyed settings
+        // (default selection, auto-detect opt-out) must survive for it.
+        let db = Database::open_in_memory().expect("test db should open");
+        let raw = serde_json::Value::Array(vec![
+            json!({ "id": "pi", "label": "Pi", "kind": "pi_sdk", "enabled": true }),
+            json!({
+                "id": "pi",
+                "label": "My Pi Proxy",
+                "kind": "custom_openai",
+                "enabled": true
+            }),
+        ]);
+        db.set_app_setting(SETTINGS_KEY, &raw.to_string())
+            .expect("seed should save");
+        db.set_app_setting("default_agent_backend", "pi")
+            .expect("default should save");
+        db.set_app_setting(&auto_detect_disabled_key("pi"), "true")
+            .expect("opt-out should save");
+
+        purge_retired_backend_settings(&db).expect("purge should succeed");
+
+        let stored = db
+            .get_app_setting(SETTINGS_KEY)
+            .expect("read should succeed")
+            .expect("blob should exist");
+        let entries: Vec<Value> = serde_json::from_str(&stored).expect("blob should parse");
+        assert_eq!(entries.len(), 1, "only the retired-kind entry is dropped");
+        assert_eq!(
+            entries[0].get("kind").and_then(Value::as_str),
+            Some("custom_openai")
+        );
+        assert_eq!(
+            db.get_app_setting("default_agent_backend")
+                .expect("read should succeed"),
+            Some("pi".to_string()),
+            "the live `pi` backend keeps its default selection"
+        );
+        assert_eq!(
+            db.get_app_setting(&auto_detect_disabled_key("pi"))
+                .expect("read should succeed"),
+            Some("true".to_string())
+        );
+    }
+
+    #[test]
+    fn purge_is_a_no_op_while_the_stored_blob_is_unreadable() {
+        // A corrupt blob means we cannot tell which ids are live, and an
+        // empty live-id set must not be read as "nothing claims `pi`" —
+        // the user's custom `pi` backend may be sitting in that very JSON,
+        // which the tolerant loader deliberately leaves in place for
+        // external recovery. Nothing may be deleted until it parses again.
+        let db = Database::open_in_memory().expect("test db should open");
+        db.set_app_setting(SETTINGS_KEY, "{ not valid json")
+            .expect("seed should save");
+        db.set_app_setting("default_agent_backend", "pi")
+            .expect("default should save");
+        db.set_app_setting(&auto_detect_disabled_key("pi"), "true")
+            .expect("opt-out should save");
+
+        purge_retired_backend_settings(&db).expect("purge should succeed");
+
+        assert_eq!(
+            db.get_app_setting(SETTINGS_KEY)
+                .expect("read should succeed"),
+            Some("{ not valid json".to_string()),
+            "corrupt blob is left untouched for recovery"
+        );
+        assert_eq!(
+            db.get_app_setting("default_agent_backend")
+                .expect("read should succeed"),
+            Some("pi".to_string()),
+            "id-keyed settings survive while the blob is unreadable"
+        );
+        assert_eq!(
+            db.get_app_setting(&auto_detect_disabled_key("pi"))
+                .expect("read should succeed"),
+            Some("true".to_string())
+        );
+    }
+
+    #[test]
+    fn purge_clears_orphaned_id_keyed_settings_when_no_blob_is_stored() {
+        // No blob at all is a *known*-empty state, unlike a corrupt one:
+        // nothing is stored, so a default naming a retired backend is a
+        // genuine orphan and should go.
+        let db = Database::open_in_memory().expect("test db should open");
+        db.set_app_setting("default_agent_backend", "lm-studio")
+            .expect("default should save");
+        db.set_app_setting(&auto_detect_disabled_key("lm-studio"), "true")
+            .expect("opt-out should save");
+
+        purge_retired_backend_settings(&db).expect("purge should succeed");
+
+        assert_eq!(
+            db.get_app_setting("default_agent_backend")
+                .expect("read should succeed"),
+            None
+        );
+        assert_eq!(
+            db.get_app_setting(&auto_detect_disabled_key("lm-studio"))
+                .expect("read should succeed"),
+            None
+        );
+    }
+
+    #[test]
+    fn retired_default_backend_falls_back_without_warning() {
+        let backends = vec![AgentBackendConfig::builtin_anthropic()];
+        let mut warnings = Vec::new();
+
+        let resolved =
+            resolve_backend_list_default(&backends, &mut warnings, "lm-studio".to_string());
+
+        assert_eq!(resolved, "anthropic");
+        assert!(warnings.is_empty(), "retired default should not warn");
+
+        // A non-retired missing default still warns — the silent path is
+        // scoped to backends we removed on purpose, not to typos or to a
+        // backend hidden by a feature gate.
+        let resolved =
+            resolve_backend_list_default(&backends, &mut warnings, "some-other".to_string());
+        assert_eq!(resolved, "anthropic");
+        assert_eq!(warnings.len(), 1);
     }
 
     #[test]
