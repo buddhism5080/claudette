@@ -147,6 +147,7 @@ beforeEach(() => {
     toolActivities: {},
     collapsedToolGroupsBySession: {},
     checkpoints: {},
+    streamingTimeline: {},
     claudeAuthFailure: null,
     resolvedClaudeAuthFailureMessageId: null,
     diffFiles: [],
@@ -976,3 +977,116 @@ describe("MessagesWithTurns workflow groups", () => {
     expect(container.querySelector('[role="progressbar"]')).not.toBeNull();
   });
 });
+
+describe("MessagesWithTurns live stream order", () => {
+  it("renders thinking, tool, then more thinking in API arrival order during a live turn", async () => {
+    useAppStore.setState({
+      showThinkingBlocks: { [SESSION_ID]: false },
+      streamingTimeline: {
+        [SESSION_ID]: [
+          {
+            type: "thinking",
+            id: "th-0",
+            content: "I will read the file first.",
+            active: false,
+          },
+          { type: "tool", id: "read-1", toolUseId: "read-1" },
+          {
+            type: "thinking",
+            id: "th-1",
+            content: "Now I can patch it.",
+            active: true,
+          },
+        ],
+      },
+      toolActivities: {
+        [SESSION_ID]: [
+          {
+            toolUseId: "read-1",
+            toolName: "Read",
+            inputJson: JSON.stringify({ path: "src/app.ts" }),
+            resultText: "",
+            collapsed: true,
+            summary: "src/app.ts",
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "Fix the bug")]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="inline"
+      />,
+    );
+
+    const text = container.textContent ?? "";
+    const firstThought = text.indexOf("I will read the file first.");
+    const tool = text.indexOf("Read");
+    expect(firstThought).toBeGreaterThan(-1);
+    expect(tool).toBeGreaterThan(firstThought);
+    // The later thinking block is still streaming (typewriter), so assert the
+    // live timeline kept it after the tool rather than requiring full text.
+    const timeline = container.querySelector(
+      "[data-testid=live-streaming-timeline]",
+    );
+    expect(timeline).not.toBeNull();
+    const thinkingLabels = Array.from(
+      timeline!.querySelectorAll("span"),
+    ).filter((el) => (el.textContent ?? "").includes("Thinking"));
+    expect(thinkingLabels.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("shows persisted assistant thinking before ordinal-0 tools, then the answer text", async () => {
+    const assistant = message("assistant-1", "Assistant", "Patched.");
+    assistant.thinking = "Need to inspect the helper.";
+    useAppStore.setState({
+      showThinkingBlocks: { [SESSION_ID]: true },
+      completedTurns: {
+        [SESSION_ID]: [
+          {
+            id: "turn-1",
+            activities: [
+              {
+                toolUseId: "read-1",
+                toolName: "Read",
+                inputJson: JSON.stringify({ path: "src/app.ts" }),
+                resultText: "ok",
+                collapsed: false,
+                summary: "src/app.ts",
+                assistantMessageOrdinal: 0,
+              },
+            ],
+            messageCount: 2,
+            collapsed: false,
+            afterMessageIndex: 2,
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "Fix the bug"), assistant]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning={false}
+        searchQuery=""
+        toolDisplayMode="inline"
+      />,
+    );
+
+    const text = container.textContent ?? "";
+    const thinking = text.indexOf("Need to inspect the helper.");
+    const tool = text.indexOf("Read");
+    const answer = text.indexOf("Patched.");
+    expect(thinking).toBeGreaterThan(-1);
+    expect(tool).toBeGreaterThan(thinking);
+    expect(answer).toBeGreaterThan(tool);
+  });
+});
+

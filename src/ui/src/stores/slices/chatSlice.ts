@@ -10,6 +10,13 @@ import { debugChat } from "../../utils/chatDebug";
 import type { CompactionEvent } from "../../utils/compactionSentinel";
 import type { WorkflowProgressEntry } from "../../types/workflow";
 import type { AppState } from "../useAppStore";
+import {
+  appendStreamingDelta,
+  startStreamingBlock,
+  type StreamingTimelineItem,
+} from "../../components/chat/streamingTimeline";
+
+export type { StreamingTimelineItem };
 
 export interface ToolActivity {
   toolUseId: string;
@@ -118,6 +125,12 @@ export interface ChatSlice {
   addChatConclusions: (sessionId: string, conclusions: AgentConclusion[]) => void;
   streamingContent: Record<string, string>;
   streamingThinking: Record<string, string>;
+  /**
+   * In-flight content blocks in API arrival order (thinking / tool / text).
+   * The live transcript renders this list instead of the three historical
+   * buckets so a later tool call cannot hide or reorder earlier tokens.
+   */
+  streamingTimeline: Record<string, StreamingTimelineItem[]>;
   pendingTypewriter: Record<string, { messageId: string; text: string } | null>;
   showThinkingBlocks: Record<string, boolean>;
   toolActivities: Record<string, ToolActivity[]>;
@@ -188,6 +201,19 @@ export interface ChatSlice {
   finishTypewriterDrain: (sessionId: string) => void;
   appendStreamingThinking: (sessionId: string, text: string) => void;
   clearStreamingThinking: (sessionId: string) => void;
+  startStreamingTimelineBlock: (
+    sessionId: string,
+    block:
+      | { type: "thinking"; id: string }
+      | { type: "text"; id: string }
+      | { type: "tool"; id: string; toolUseId: string },
+  ) => void;
+  appendStreamingTimelineDelta: (
+    sessionId: string,
+    type: "thinking" | "text",
+    text: string,
+  ) => void;
+  clearStreamingTimeline: (sessionId: string) => void;
   setShowThinkingBlocks: (sessionId: string, show: boolean) => void;
   setToolActivities: (sessionId: string, activities: ToolActivity[]) => void;
   addToolActivity: (sessionId: string, activity: ToolActivity) => void;
@@ -340,6 +366,7 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
     }),
   streamingContent: {},
   streamingThinking: {},
+  streamingTimeline: {},
   pendingTypewriter: {},
   showThinkingBlocks: {},
   toolActivities: {},
@@ -446,6 +473,7 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
     set((s) => ({
       pendingTypewriter: { ...s.pendingTypewriter, [sessionId]: null },
       streamingThinking: { ...s.streamingThinking, [sessionId]: "" },
+      streamingTimeline: { ...s.streamingTimeline, [sessionId]: [] },
     })),
   appendStreamingThinking: (sessionId, text) =>
     set((s) => ({
@@ -457,6 +485,31 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
   clearStreamingThinking: (sessionId) =>
     set((s) => ({
       streamingThinking: { ...s.streamingThinking, [sessionId]: "" },
+    })),
+  startStreamingTimelineBlock: (sessionId, block) =>
+    set((s) => ({
+      streamingTimeline: {
+        ...s.streamingTimeline,
+        [sessionId]: startStreamingBlock(
+          s.streamingTimeline[sessionId] ?? [],
+          block,
+        ),
+      },
+    })),
+  appendStreamingTimelineDelta: (sessionId, type, text) =>
+    set((s) => ({
+      streamingTimeline: {
+        ...s.streamingTimeline,
+        [sessionId]: appendStreamingDelta(
+          s.streamingTimeline[sessionId] ?? [],
+          type,
+          text,
+        ),
+      },
+    })),
+  clearStreamingTimeline: (sessionId) =>
+    set((s) => ({
+      streamingTimeline: { ...s.streamingTimeline, [sessionId]: [] },
     })),
   setShowThinkingBlocks: (sessionId, show) =>
     set((s) => ({

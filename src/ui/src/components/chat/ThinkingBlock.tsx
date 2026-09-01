@@ -23,11 +23,11 @@ export function ThinkingBlock({
   inline = false,
   searchQuery,
 }: ThinkingBlockProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(isStreaming);
   const label = isStreaming ? "Thinking…" : "Thinking";
   const queryMatches =
     !!searchQuery && content.toLowerCase().includes(searchQuery.toLowerCase());
-  const isExpanded = inline || expanded || queryMatches;
+  const isExpanded = inline || expanded || queryMatches || isStreaming;
   const { displayed, showCaret } = useTypewriter(content, isStreaming, {
     enabled: !!enableTypewriter && isExpanded,
   });

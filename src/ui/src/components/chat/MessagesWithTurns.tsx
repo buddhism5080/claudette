@@ -47,6 +47,11 @@ import styles from "./ChatPanel.module.css";
 import { TurnSummary } from "./TurnSummary";
 import { ToolActivityRow } from "./ToolActivityRow";
 import { ToolActivitiesSection } from "./ToolActivitiesSection";
+import { LiveStreamingTimeline } from "./LiveStreamingTimeline";
+import {
+  timelineHasVisibleContent,
+  toolUseIdsInTimeline,
+} from "./streamingTimeline";
 import { TurnFooter } from "./TurnFooter";
 import { TurnEditSummaryCard } from "./EditChangeSummary";
 import { summarizeTurnEdits } from "./editActivitySummary";
@@ -68,6 +73,7 @@ import {
   EMPTY_CHECKPOINTS,
   EMPTY_COMPLETED_TURNS,
   EMPTY_CONCLUSIONS,
+  EMPTY_TIMELINE,
   type RollbackModalData,
 } from "./chatConstants";
 import { ConclusionCard } from "./ConclusionCard";
@@ -175,6 +181,9 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
   const fileIndex = useWorkspaceFileIndex(workspaceId);
   const liveToolActivities = useAppStore(
     (s) => s.toolActivities[sessionId] ?? EMPTY_ACTIVITIES,
+  );
+  const streamingTimeline = useAppStore(
+    (s) => s.streamingTimeline[sessionId] ?? EMPTY_TIMELINE,
   );
   const resolvedClaudeAuthFailureMessageId = useAppStore(
     (s) => s.resolvedClaudeAuthFailureMessageId,
@@ -844,6 +853,10 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
   const renderLiveToolActivity = (position: number) => {
     const activities = liveToolActivitiesByPosition.get(position);
     if (!activities) return null;
+    const leftover = timelineVisible
+      ? activities.filter((activity) => !timelineToolIds.has(activity.toolUseId))
+      : activities;
+    if (leftover.length === 0) return null;
     return (
       <ToolActivitiesSection
         key={`live-tool-activity-${position}`}
@@ -851,7 +864,7 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
         toolDisplayMode={toolDisplayMode}
         searchQuery={searchQuery}
         worktreePath={worktreePath}
-        activities={activities}
+        activities={leftover}
       />
     );
   };
@@ -861,13 +874,27 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
       !!pendingMessageId && messages.some((msg) => msg.id === pendingMessageId),
     [messages, pendingMessageId],
   );
+  const timelineVisible = timelineHasVisibleContent(streamingTimeline);
+  const timelineToolIds = useMemo(
+    () => toolUseIdsInTimeline(streamingTimeline),
+    [streamingTimeline],
+  );
 
   const renderStreamingTail = (position: number) => {
-    if (
-      pendingMessageInWindow ||
-      position !== globalOffset + messages.length ||
-      (!streamingThinkingNode && !streamingMessageNode)
-    ) {
+    if (position !== globalOffset + messages.length) return null;
+    if (timelineVisible) {
+      return (
+        <LiveStreamingTimeline
+          key={`streaming-tail-${position}`}
+          sessionId={sessionId}
+          isStreaming={isRunning}
+          toolDisplayMode={toolDisplayMode}
+          searchQuery={searchQuery}
+          worktreePath={worktreePath}
+        />
+      );
+    }
+    if (pendingMessageInWindow || (!streamingThinkingNode && !streamingMessageNode)) {
       return null;
     }
     return (
@@ -927,12 +954,29 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
           isClaudeAuthError(msg.content);
 
         // Default rendering for User, Assistant, and non-sentinel System messages.
+        // Assistant thinking is hoisted above tools at this position so API
+        // order (thinking → tool_use → text) is preserved instead of rendering
+        // ordinal-0 tools before the whole assistant bubble.
+        const pending = msg.id === pendingMessageId;
+        const assistantThinking =
+          !pending &&
+          msg.role === "Assistant" &&
+          msg.thinking &&
+          showThinkingBlocks ? (
+            <ThinkingBlock
+              content={msg.thinking}
+              isStreaming={false}
+              inline={toolDisplayMode === "inline"}
+              searchQuery={searchQuery}
+            />
+          ) : null;
         return (
           <React.Fragment key={msg.id}>
+            {assistantThinking}
             {renderTurns(globalOffset + idx)}
             {renderLiveToolActivity(globalOffset + idx)}
-            {msg.id === pendingMessageId ? (
-              streamingMessageNode
+            {pending ? (
+              timelineVisible ? null : streamingMessageNode
             ) : (
               <div
                 className={`${styles.message} ${styles[
@@ -954,16 +998,6 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
                     className={styles.userMessageCopyButton}
                   />
                 )}
-                {msg.role === "Assistant" &&
-                  msg.thinking &&
-                  showThinkingBlocks && (
-                    <ThinkingBlock
-                      content={msg.thinking}
-                      isStreaming={false}
-                      inline={toolDisplayMode === "inline"}
-                      searchQuery={searchQuery}
-                    />
-                  )}
                 <div className={styles.content}>
                   {attachmentsByMessage.has(msg.id) && (
                     <div className={styles.messageImages}>

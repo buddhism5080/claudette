@@ -338,6 +338,13 @@ export function useAgentStream() {
   const setPendingTypewriter = useAppStore((s) => s.setPendingTypewriter);
   const appendStreamingThinking = useAppStore((s) => s.appendStreamingThinking);
   const clearStreamingThinking = useAppStore((s) => s.clearStreamingThinking);
+  const startStreamingTimelineBlock = useAppStore(
+    (s) => s.startStreamingTimelineBlock,
+  );
+  const appendStreamingTimelineDelta = useAppStore(
+    (s) => s.appendStreamingTimelineDelta,
+  );
+  const clearStreamingTimeline = useAppStore((s) => s.clearStreamingTimeline);
   const addChatMessage = useAppStore((s) => s.addChatMessage);
   const addToolActivity = useAppStore((s) => s.addToolActivity);
   const updateToolActivity = useAppStore((s) => s.updateToolActivity);
@@ -428,6 +435,7 @@ export function useAgentStream() {
         clearPromptStartTimeIfWorkspaceIdle(wsId);
         setStreamingContent(sessionId, "");
         clearStreamingThinking(sessionId);
+        clearStreamingTimeline(sessionId);
         clearBlockToolsForSession(blockToolMapRef.current, sessionId);
         delete thinkingBlocksRef.current[sessionId];
         // NOTE: Do NOT clear agentQuestion here. In --print mode the CLI
@@ -690,6 +698,7 @@ export function useAgentStream() {
                   const delta = inner.delta;
                   if ("type" in delta && delta.type === "text_delta") {
                     appendStreamingContent(sessionId, delta.text);
+                    appendStreamingTimelineDelta(sessionId, "text", delta.text);
                   }
                   if (
                     "type" in delta &&
@@ -734,6 +743,11 @@ export function useAgentStream() {
                     delta.thinking
                   ) {
                     appendStreamingThinking(sessionId, delta.thinking);
+                    appendStreamingTimelineDelta(
+                      sessionId,
+                      "thinking",
+                      delta.thinking,
+                    );
                   }
                   break;
                 }
@@ -744,8 +758,24 @@ export function useAgentStream() {
                     inner.content_block.type === "thinking"
                   ) {
                     (thinkingBlocksRef.current[sessionId] ??= new Set()).add(inner.index);
-                    // Clear previous thinking — new turn's thinking replaces old.
-                    clearStreamingThinking(sessionId);
+                    // Freeze the previous thinking/text block in the timeline.
+                    // Do NOT clear streamingThinking — that hid the tokens the
+                    // API already sent as soon as the next block (often a
+                    // tool_use) started.
+                    startStreamingTimelineBlock(sessionId, {
+                      type: "thinking",
+                      id: `thinking-${inner.index}`,
+                    });
+                  }
+                  if (
+                    inner.content_block &&
+                    "type" in inner.content_block &&
+                    inner.content_block.type === "text"
+                  ) {
+                    startStreamingTimelineBlock(sessionId, {
+                      type: "text",
+                      id: `text-${inner.index}`,
+                    });
                   }
                   if (
                     inner.content_block &&
@@ -764,6 +794,11 @@ export function useAgentStream() {
                         toolName: inner.content_block.name,
                       },
                     );
+                    startStreamingTimelineBlock(sessionId, {
+                      type: "tool",
+                      id: inner.content_block.id,
+                      toolUseId: inner.content_block.id,
+                    });
                     addToolActivity(sessionId, {
                       toolUseId: inner.content_block.id,
                       toolName: inner.content_block.name,
@@ -964,6 +999,9 @@ export function useAgentStream() {
     setStreamingContent,
     appendStreamingThinking,
     clearStreamingThinking,
+    startStreamingTimelineBlock,
+    appendStreamingTimelineDelta,
+    clearStreamingTimeline,
     addChatMessage,
     setPendingTypewriter,
     addToolActivity,

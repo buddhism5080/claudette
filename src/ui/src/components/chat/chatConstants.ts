@@ -1,6 +1,7 @@
 import type { CompletedTurn, ToolActivity } from "../../stores/useAppStore";
 import type { AgentConclusion, ChatAttachment } from "../../types/chat";
 import type { ConversationCheckpoint } from "../../types/checkpoint";
+import type { StreamingTimelineItem } from "./streamingTimeline";
 
 // Stable empty arrays to avoid Zustand selector re-renders when data is undefined.
 // Without these, `?? []` / `|| []` creates a new reference on every store update,
@@ -14,6 +15,7 @@ export const EMPTY_ACTIVITIES: readonly ToolActivity[] = Object.freeze([]);
 export const EMPTY_ATTACHMENTS: readonly ChatAttachment[] = Object.freeze([]);
 export const EMPTY_CONCLUSIONS: readonly AgentConclusion[] = Object.freeze([]);
 export const EMPTY_CHECKPOINTS: readonly ConversationCheckpoint[] = Object.freeze([]);
+export const EMPTY_TIMELINE: readonly StreamingTimelineItem[] = Object.freeze([]);
 
 export type RollbackModalData = {
   workspaceId: string;
