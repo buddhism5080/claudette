@@ -10,6 +10,7 @@ import { debugChat } from "../../utils/chatDebug";
 import type { CompactionEvent } from "../../utils/compactionSentinel";
 import type { WorkflowProgressEntry } from "../../types/workflow";
 import type { AppState } from "../useAppStore";
+import { adoptPersistedAssistantIntoLive } from "../../hooks/useAgentStreamLogic";
 import {
   appendStreamingDelta,
   startStreamingBlock,
@@ -181,6 +182,8 @@ export interface ChatSlice {
     message: ChatMessage,
     options?: { persisted?: boolean },
   ) => void;
+  /** Replace a live assistant UUID with the DB row's id, or append if none. */
+  adoptPersistedAssistantMessage: (sessionId: string, message: ChatMessage) => void;
   /** Sessions with a repo setup script currently executing, keyed by chat
    *  session id; the value is the user-facing source *label* shown in the
    *  running banner (`".claudette.json"` for repo config, `"settings"` for the
@@ -443,6 +446,27 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
               },
             }
           : {}),
+      };
+    }),
+  adoptPersistedAssistantMessage: (sessionId, message) =>
+    set((s) => {
+      const msgs = s.chatMessages[sessionId] || [];
+      const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
+        msgs,
+        message,
+      );
+      if (messages === msgs) return s;
+      const liveId = s.liveAssistantMessageId[sessionId];
+      return {
+        chatMessages: { ...s.chatMessages, [sessionId]: messages },
+        lastMessages: {
+          ...s.lastMessages,
+          [sessionId]: messages[messages.length - 1],
+        },
+        liveAssistantMessageId:
+          liveId && adoptedFromId && liveId === adoptedFromId
+            ? { ...s.liveAssistantMessageId, [sessionId]: message.id }
+            : s.liveAssistantMessageId,
       };
     }),
   runningSetupScripts: {},

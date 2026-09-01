@@ -6,6 +6,7 @@ import {
   firstApprovalDetailString,
   initialToolInputJson,
   mergeReloadedAssistantThinking,
+  adoptPersistedAssistantIntoLive,
   type CommandLineApplyDeps,
 } from "./useAgentStreamLogic";
 
@@ -132,6 +133,43 @@ describe("mergeReloadedAssistantThinking", () => {
       "from timeline",
     );
     expect(merged[0]?.thinking).toBe("from db");
+  });
+
+  it("pairs thinking-only then text in order, not by empty content", () => {
+    const merged = mergeReloadedAssistantThinking(
+      [
+        { role: "Assistant", content: "", thinking: null },
+        { role: "Assistant", content: "Done.", thinking: null },
+      ],
+      [
+        { role: "Assistant", content: "", thinking: "plan the read" },
+        { role: "Assistant", content: "Done.", thinking: "summarize" },
+      ],
+      "",
+    );
+    expect(merged[0]?.thinking).toBe("plan the read");
+    expect(merged[1]?.thinking).toBe("summarize");
+  });
+});
+
+describe("adoptPersistedAssistantIntoLive", () => {
+  it("replaces the live UUID when content matches", () => {
+    const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
+      [{ id: "live-1", role: "Assistant", content: "Done.", thinking: "plan" }],
+      { id: "db-1", role: "Assistant", content: "Done.", thinking: "plan" },
+    );
+    expect(adoptedFromId).toBe("live-1");
+    expect(messages[0]?.id).toBe("db-1");
+    expect(messages).toHaveLength(1);
+  });
+
+  it("matches thinking-only rows with empty content", () => {
+    const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
+      [{ id: "live-th", role: "Assistant", content: "", thinking: "plan the read" }],
+      { id: "db-th", role: "Assistant", content: "", thinking: "plan the read" },
+    );
+    expect(adoptedFromId).toBe("live-th");
+    expect(messages[0]?.id).toBe("db-th");
   });
 });
 

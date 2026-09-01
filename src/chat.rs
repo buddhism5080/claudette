@@ -272,6 +272,18 @@ pub fn build_assistant_chat_message(args: BuildAssistantArgs<'_>) -> ChatMessage
     }
 }
 
+/// Insert an assistant row and return it. `content` may be empty when
+/// `thinking` is set — fork/rollback need that row to exist so
+/// `checkpoint.message_id` still sits inside `chat_messages`.
+pub fn persist_assistant_chat_message(
+    db: &Database,
+    args: BuildAssistantArgs<'_>,
+) -> Option<ChatMessage> {
+    let msg = build_assistant_chat_message(args);
+    db.insert_chat_message(&msg).ok()?;
+    Some(msg)
+}
+
 /// Build the `COMPACTION:trigger:pre:post:duration` system sentinel row.
 ///
 /// Persisted on `subtype: "compact_boundary"` events so the timeline renders

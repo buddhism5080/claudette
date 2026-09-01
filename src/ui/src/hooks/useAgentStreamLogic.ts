@@ -108,11 +108,9 @@ export function extractAssistantMessageParts(content: ContentBlock[]): {
 }
 
 /**
- * Checkpoint reload replaces live UUID messages with DB rows. Those rows
- * often have empty `thinking` because the CLI's assistant event is
- * text-only. Copy thinking from the live messages (matched by content)
- * or from the still-mounted streaming timeline so the block survives
- * turn end.
+ * Checkpoint reload replaces live UUID messages with DB rows. Pair
+ * assistants in order so thinking-only rows (empty content) still keep
+ * their thinking. Fork/rollback use the DB ids.
  */
 export function mergeReloadedAssistantThinking<
   T extends { role: string; content: string; thinking?: string | null },
@@ -121,29 +119,78 @@ export function mergeReloadedAssistantThinking<
   liveMessages: readonly T[],
   timelineThinking: string,
 ): T[] {
-  const liveByContent = new Map<string, string>();
-  for (const msg of liveMessages) {
-    if (msg.role === "Assistant" && msg.thinking?.trim()) {
-      liveByContent.set(msg.content, msg.thinking);
-    }
-  }
+  return reconcileReloadedTranscript(dbMessages, liveMessages, timelineThinking);
+}
+
+export function reconcileReloadedTranscript<
+  T extends { role: string; content: string; thinking?: string | null },
+>(
+  dbMessages: T[],
+  liveMessages: readonly T[],
+  timelineThinking = "",
+): T[] {
+  const liveAsst = liveMessages.filter((msg) => msg.role === "Assistant");
+  let i = 0;
   const merged = dbMessages.map((msg) => {
     if (msg.role !== "Assistant") return msg;
-    if (msg.thinking?.trim()) return msg;
-    const fromLive = liveByContent.get(msg.content);
-    if (fromLive) return { ...msg, thinking: fromLive };
+    const live = liveAsst[i++];
+    if (!msg.thinking?.trim() && live?.thinking?.trim()) {
+      return { ...msg, thinking: live.thinking };
+    }
     return msg;
   });
   if (
     timelineThinking.trim() &&
     !merged.some((msg) => msg.role === "Assistant" && msg.thinking?.trim())
   ) {
-    for (let i = merged.length - 1; i >= 0; i--) {
-      if (merged[i]?.role === "Assistant") {
-        merged[i] = { ...merged[i], thinking: timelineThinking };
+    for (let j = merged.length - 1; j >= 0; j--) {
+      if (merged[j]?.role === "Assistant") {
+        merged[j] = { ...merged[j], thinking: timelineThinking };
         break;
       }
     }
   }
   return merged;
+}
+
+export function adoptPersistedAssistantIntoLive<
+  T extends { id: string; role: string; content: string; thinking?: string | null },
+>(
+  live: T[],
+  persisted: T,
+): { messages: T[]; adoptedFromId: string | null } {
+  if (persisted.role !== "Assistant") {
+    if (live.some((msg) => msg.id === persisted.id)) {
+      return { messages: live, adoptedFromId: persisted.id };
+    }
+    return { messages: [...live, persisted], adoptedFromId: null };
+  }
+  const idx = live.findIndex((msg) => {
+    if (msg.id === persisted.id) return true;
+    if (msg.role !== "Assistant") return false;
+    if (msg.content && persisted.content && msg.content === persisted.content) {
+      return true;
+    }
+    if (!msg.content.trim() && !persisted.content.trim()) {
+      const liveThinking = (msg.thinking || "").trim();
+      const persistedThinking = (persisted.thinking || "").trim();
+      return liveThinking.length > 0 && liveThinking === persistedThinking;
+    }
+    return false;
+  });
+  if (idx < 0) {
+    return { messages: [...live, persisted], adoptedFromId: null };
+  }
+  const oldId = live[idx]!.id;
+  const messages = live.map((msg, i) =>
+    i === idx
+      ? {
+          ...msg,
+          ...persisted,
+          thinking: persisted.thinking || msg.thinking,
+          content: persisted.content || msg.content,
+        }
+      : msg,
+  );
+  return { messages, adoptedFromId: oldId };
 }

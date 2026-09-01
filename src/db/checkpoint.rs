@@ -2660,6 +2660,47 @@ mod tests {
     }
 
     #[test]
+    fn test_list_messages_up_to_keeps_thinking_only_before_text_anchor() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "u1", "w1", ChatRole::User, "go"))
+            .unwrap();
+        let mut thinking_only = make_chat_msg(&db, "th1", "w1", ChatRole::Assistant, "");
+        thinking_only.thinking = Some("plan the read".into());
+        db.insert_chat_message(&thinking_only).unwrap();
+        db.insert_chat_message(&make_chat_msg(
+            &db,
+            "a1",
+            "w1",
+            ChatRole::Assistant,
+            "done",
+        ))
+        .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "u2", "w1", ChatRole::User, "next"))
+            .unwrap();
+
+        let msgs = db.list_messages_up_to("w1", "a1").unwrap();
+        let ids: Vec<_> = msgs.iter().map(|m| m.id.clone()).collect();
+        assert_eq!(
+            ids,
+            vec!["u1".to_string(), "th1".to_string(), "a1".to_string()]
+        );
+        assert_eq!(msgs[1].thinking.as_deref(), Some("plan the read"));
+
+        let session = db
+            .default_session_id_for_workspace("w1")
+            .unwrap()
+            .expect("session");
+        let deleted = db.delete_session_messages_after(&session, "a1").unwrap();
+        assert_eq!(deleted, 1);
+        let remaining = db.list_chat_messages_for_session(&session).unwrap();
+        let remaining_ids: Vec<_> = remaining.iter().map(|m| m.id.clone()).collect();
+        assert_eq!(
+            remaining_ids,
+            vec!["u1".to_string(), "th1".to_string(), "a1".to_string()]
+        );
+    }
+
+    #[test]
     fn test_list_checkpoints_up_to() {
         let db = setup_db_with_workspace();
         db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a"))

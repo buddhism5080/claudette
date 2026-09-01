@@ -355,6 +355,26 @@ describe("appendLiveAssistantPart", () => {
     expect(msgs[0]?.thinking).toBe("first");
     expect(msgs[1]?.content).toBe("after tools");
   });
+
+  it("adopts the persisted DB id onto the live assistant row", () => {
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "text",
+      text: "Done.",
+    });
+    const liveId = useAppStore.getState().liveAssistantMessageId[WS_ID];
+    expect(liveId).toBeTruthy();
+    const live = useAppStore.getState().chatMessages[WS_ID]![0]!;
+    useAppStore.getState().adoptPersistedAssistantMessage(WS_ID, {
+      ...live,
+      id: "db-row-1",
+    });
+    const msgs = useAppStore.getState().chatMessages[WS_ID] ?? [];
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]?.id).toBe("db-row-1");
+    expect(useAppStore.getState().liveAssistantMessageId[WS_ID]).toBe(
+      "db-row-1",
+    );
+  });
 });
 
 describe("finishTypewriterDrain (per-workspace)", () => {
@@ -1352,6 +1372,63 @@ describe("rollbackConversation", () => {
     useAppStore.getState().rollbackConversation(WS_ID, WS_ID, "cp1", []);
 
     expect(useAppStore.getState().streamingContent[WS_ID]).toBe("");
+  });
+
+  it("keeps thinking-only rows from the truncated list and clears live id", () => {
+    useAppStore.setState({
+      liveAssistantMessageId: { [WS_ID]: "live-temp" },
+      checkpoints: { [WS_ID]: [makeCheckpoint("cp1", WS_ID, "a1", 0)] },
+    });
+    const truncated = [
+      {
+        id: "u1",
+        workspace_id: WS_ID,
+        chat_session_id: WS_ID,
+        role: "User" as const,
+        content: "go",
+        cost_usd: null,
+        duration_ms: null,
+        created_at: "",
+        thinking: null,
+        input_tokens: null,
+        output_tokens: null,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+      },
+      {
+        id: "th1",
+        workspace_id: WS_ID,
+        chat_session_id: WS_ID,
+        role: "Assistant" as const,
+        content: "",
+        cost_usd: null,
+        duration_ms: null,
+        created_at: "",
+        thinking: "plan the read",
+        input_tokens: null,
+        output_tokens: null,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+      },
+      {
+        id: "a1",
+        workspace_id: WS_ID,
+        chat_session_id: WS_ID,
+        role: "Assistant" as const,
+        content: "done",
+        cost_usd: null,
+        duration_ms: null,
+        created_at: "",
+        thinking: null,
+        input_tokens: null,
+        output_tokens: null,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+      },
+    ];
+    useAppStore.getState().rollbackConversation(WS_ID, WS_ID, "cp1", truncated);
+    expect(useAppStore.getState().chatMessages[WS_ID]).toEqual(truncated);
+    expect(useAppStore.getState().liveAssistantMessageId[WS_ID]).toBeNull();
   });
 
   it("trims checkpoints after the target", () => {

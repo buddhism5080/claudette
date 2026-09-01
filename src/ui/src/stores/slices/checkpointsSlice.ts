@@ -90,6 +90,7 @@ export const createCheckpointsSlice: StateCreator<
         streamingContent: { ...s.streamingContent, [sessionId]: "" },
         streamingThinking: { ...s.streamingThinking, [sessionId]: "" },
         streamingTimeline: { ...s.streamingTimeline, [sessionId]: [] },
+        liveAssistantMessageId: { ...s.liveAssistantMessageId, [sessionId]: null },
         agentQuestions: restQuestions,
         planApprovals: restApprovals,
         agentApprovals: restAgentApprovals,

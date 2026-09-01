@@ -16,9 +16,10 @@ use claudette::agent_backend::AgentBackendRuntimeHarness;
 use claudette::base64_decode;
 use claudette::chat::{
     BuildAssistantArgs, CheckpointArgs, RequestedFlags, SessionFlags,
-    assistant_usage_fields_from_result, build_assistant_chat_message, build_compaction_sentinel,
+    assistant_usage_fields_from_result, build_compaction_sentinel,
     build_permission_response, create_turn_checkpoint, extract_assistant_text,
-    append_pending_thinking, extract_event_thinking, persistent_session_flags_drifted,
+    persist_assistant_chat_message, append_pending_thinking, extract_event_thinking,
+    persistent_session_flags_drifted,
 };
 use claudette::db::Database;
 use claudette::env::WorkspaceEnv;
@@ -2550,6 +2551,9 @@ pub async fn send_chat_message(
         // be attached to the next text-bearing assistant message. The CLI
         // may fire a thinking-only event followed by a text-only event.
         let mut pending_thinking: Option<String> = None;
+        // After a tool_use flushes thinking into its own row, later
+        // assistant events must not re-extract that same thinking.
+        let mut thinking_flushed = false;
         // Tracks the most recent per-message usage observed on a MessageDelta
         // event. Written into the next persisted assistant ChatMessage and reset
         // to None after each persistence so per-message counts stay distinct
@@ -2755,9 +2759,33 @@ pub async fn send_chat_message(
                         ..
                     },
             }) = &event
-                && claudette::mcp_supervisor::extract_mcp_server_name(name).is_some()
             {
-                mcp_tool_names.insert(id.clone(), name.clone());
+                if claudette::mcp_supervisor::extract_mcp_server_name(name).is_some() {
+                    mcp_tool_names.insert(id.clone(), name.clone());
+                }
+                // Thinking that arrived before this tool must be its own
+                // chat_messages row. Otherwise checkpoint.message_id (the
+                // later text row) would be the only assistant id, and the
+                // live thinking-only bubble would vanish on reload — and
+                // fork/rollback would have nothing to copy for it.
+                if let Some(thinking) = pending_thinking.take()
+                    && let Ok(db) = Database::open(&db_path)
+                    && let Some(msg) = persist_assistant_chat_message(
+                        &db,
+                        BuildAssistantArgs {
+                            workspace_id: &ws_id,
+                            chat_session_id: &chat_session_id_for_stream,
+                            content: String::new(),
+                            thinking: Some(thinking),
+                            usage: None,
+                            created_at: now_iso(),
+                        },
+                    )
+                {
+                    last_assistant_msg_id = Some(msg.id.clone());
+                    thinking_flushed = true;
+                    let _ = app.emit("chat-message", &msg);
+                }
             }
 
             // Synthetic user messages (post-compaction continuation). The
@@ -3271,42 +3299,45 @@ pub async fn send_chat_message(
                 drop(agents);
                 crate::tray::rebuild_tray(&app);
             }
-            // Persist assistant messages to DB on completion.
-            // The CLI may fire multiple assistant events per turn: one with
-            // thinking blocks only, then one with text. We accumulate thinking
-            // and only save when we have text content to attach it to.
+            // Persist assistant messages. Thinking-only rows are saved when
+            // a tool_use already flushed them; this path saves text (with
+            // any remaining thinking) and thinking-only events that never
+            // hit a tool. checkpoint.message_id must always be a real row.
             if let AgentEvent::Stream(StreamEvent::Assistant { ref message }) = event {
                 let full_text = extract_assistant_text(message);
                 if auth_failure_message_from_assistant_text(&full_text).is_some() {
                     assistant_auth_failure_seen = true;
                 }
 
-                // Accumulate thinking from this event.
-                // Accumulate thinking from this event only when stream
-                // deltas did not already fill the buffer (otherwise we
-                // would duplicate the same tokens).
-                if pending_thinking.is_none() {
+                if pending_thinking.is_none() && !thinking_flushed {
                     if let Some(t) = extract_event_thinking(message) {
                         pending_thinking = Some(t);
                     }
                 }
 
-                // Only save when we have text content — attach accumulated thinking.
-                if !full_text.trim().is_empty()
+                let has_text = !full_text.trim().is_empty();
+                let thinking = if has_text || !thinking_flushed {
+                    pending_thinking.take()
+                } else {
+                    None
+                };
+                if (has_text || thinking.as_ref().is_some_and(|t| !t.trim().is_empty()))
                     && let Ok(db) = Database::open(&db_path)
+                    && let Some(msg) = persist_assistant_chat_message(
+                        &db,
+                        BuildAssistantArgs {
+                            workspace_id: &ws_id,
+                            chat_session_id: &chat_session_id_for_stream,
+                            content: full_text,
+                            thinking,
+                            usage: latest_usage.take(),
+                            created_at: now_iso(),
+                        },
+                    )
                 {
-                    let msg = build_assistant_chat_message(BuildAssistantArgs {
-                        workspace_id: &ws_id,
-                        chat_session_id: &chat_session_id_for_stream,
-                        content: full_text,
-                        thinking: pending_thinking.take(),
-                        usage: latest_usage.take(),
-                        created_at: now_iso(),
-                    });
-                    let msg_id = msg.id.clone();
-                    if db.insert_chat_message(&msg).is_ok() {
-                        last_assistant_msg_id = Some(msg_id);
-                    }
+                    last_assistant_msg_id = Some(msg.id.clone());
+                    thinking_flushed = !has_text;
+                    let _ = app.emit("chat-message", &msg);
                 }
             }
 
@@ -3318,6 +3349,25 @@ pub async fn send_chat_message(
                 ..
             }) = &event
             {
+                if let Ok(db) = Database::open(&db_path)
+                    && let Some(thinking) = pending_thinking.take()
+                    && !thinking.trim().is_empty()
+                    && let Some(msg) = persist_assistant_chat_message(
+                        &db,
+                        BuildAssistantArgs {
+                            workspace_id: &ws_id,
+                            chat_session_id: &chat_session_id_for_stream,
+                            content: String::new(),
+                            thinking: Some(thinking),
+                            usage: None,
+                            created_at: now_iso(),
+                        },
+                    )
+                {
+                    last_assistant_msg_id = Some(msg.id.clone());
+                    let _ = app.emit("chat-message", &msg);
+                }
+                thinking_flushed = false;
                 if let Ok(db) = Database::open(&db_path)
                     && let Some(ref msg_id) = last_assistant_msg_id
                 {

@@ -1441,17 +1441,27 @@ export function useAgentStream() {
 
   // Backend-authored chat messages that are not tied to the normal GUI send
   // path. Claude Remote Control uses this for remote-origin user prompts.
+  const adoptPersistedAssistantMessage = useAppStore(
+    (s) => s.adoptPersistedAssistantMessage,
+  );
   useEffect(() => {
     let active = true;
     const unlisten = listen<ChatMessage>("chat-message", (event) => {
       if (!active) return;
+      if (event.payload.role === "Assistant") {
+        adoptPersistedAssistantMessage(
+          event.payload.chat_session_id,
+          event.payload,
+        );
+        return;
+      }
       addChatMessage(event.payload.chat_session_id, event.payload);
     });
     return () => {
       active = false;
       unlisten.then((fn) => fn());
     };
-  }, [addChatMessage]);
+  }, [addChatMessage, adoptPersistedAssistantMessage]);
 
   // Listen for agent-authored attachments delivered via the
   // `mcp__claudette__send_to_user` tool. The Rust bridge has already
