@@ -389,24 +389,49 @@ describe("appendLiveAssistantPart", () => {
     expect(msgs[1]?.content).toBe("Done.");
   });
 
-  it("adopts the persisted DB id onto the live assistant row", () => {
+  it("opens a live row with the persisted id instead of minting a second uuid", () => {
     useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
-      type: "text",
-      text: "Done.",
+      type: "thinking",
+      text: "",
+      id: "db-thinking-1",
     });
-    const liveId = useAppStore.getState().liveAssistantMessageId[WS_ID];
-    expect(liveId).toBeTruthy();
-    const live = useAppStore.getState().chatMessages[WS_ID]![0]!;
-    useAppStore.getState().adoptPersistedAssistantMessage(WS_ID, {
-      ...live,
-      id: "db-row-1",
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "thinking",
+      text: "plan",
     });
     const msgs = useAppStore.getState().chatMessages[WS_ID] ?? [];
     expect(msgs).toHaveLength(1);
-    expect(msgs[0]?.id).toBe("db-row-1");
+    expect(msgs[0]?.id).toBe("db-thinking-1");
+    expect(msgs[0]?.thinking).toBe("plan");
     expect(useAppStore.getState().liveAssistantMessageId[WS_ID]).toBe(
-      "db-row-1",
+      "db-thinking-1",
     );
+  });
+
+  it("upserts a persisted row by id without renaming a different live row", () => {
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "text",
+      text: "Done.",
+      id: "live-1",
+    });
+    useAppStore.getState().upsertPersistedChatMessage(WS_ID, {
+      id: "db-row-1",
+      workspace_id: "ws-1",
+      chat_session_id: WS_ID,
+      role: "Assistant",
+      content: "Done.",
+      cost_usd: null,
+      duration_ms: null,
+      created_at: new Date().toISOString(),
+      thinking: null,
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+      cache_creation_tokens: null,
+    });
+    const msgs = useAppStore.getState().chatMessages[WS_ID] ?? [];
+    expect(msgs.map((m) => m.id)).toEqual(["live-1", "db-row-1"]);
+    expect(useAppStore.getState().liveAssistantMessageId[WS_ID]).toBe("live-1");
   });
 });
 

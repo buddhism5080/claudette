@@ -10,7 +10,7 @@ import { debugChat } from "../../utils/chatDebug";
 import type { CompactionEvent } from "../../utils/compactionSentinel";
 import type { WorkflowProgressEntry } from "../../types/workflow";
 import type { AppState } from "../useAppStore";
-import { adoptPersistedAssistantIntoLive } from "../../hooks/useAgentStreamLogic";
+import { upsertPersistedMessageById } from "../../hooks/useAgentStreamLogic";
 import {
   appendStreamingDelta,
   startStreamingBlock,
@@ -182,8 +182,8 @@ export interface ChatSlice {
     message: ChatMessage,
     options?: { persisted?: boolean },
   ) => void;
-  /** Replace a live assistant UUID with the DB row's id, or append if none. */
-  adoptPersistedAssistantMessage: (sessionId: string, message: ChatMessage) => void;
+  /** Same id merges; a new id appends. Never match by content. */
+  upsertPersistedChatMessage: (sessionId: string, message: ChatMessage) => void;
   /** Sessions with a repo setup script currently executing, keyed by chat
    *  session id; the value is the user-facing source *label* shown in the
    *  running banner (`".claudette.json"` for repo config, `"settings"` for the
@@ -221,7 +221,7 @@ export interface ChatSlice {
   appendLiveAssistantPart: (
     sessionId: string,
     workspaceId: string,
-    part: { type: "thinking" | "text"; text: string },
+    part: { type: "thinking" | "text"; text: string; id?: string },
   ) => void;
   sealLiveAssistantMessage: (sessionId: string) => void;
   setShowThinkingBlocks: (sessionId: string, show: boolean) => void;
@@ -448,26 +448,30 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
           : {}),
       };
     }),
-  adoptPersistedAssistantMessage: (sessionId, message) =>
+  upsertPersistedChatMessage: (sessionId, message) =>
     set((s) => {
       const msgs = s.chatMessages[sessionId] || [];
-      const liveId = s.liveAssistantMessageId[sessionId];
-      const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
-        msgs,
-        message,
-        { liveId },
-      );
+      const existed = msgs.some((msg) => msg.id === message.id);
+      const messages = upsertPersistedMessageById(msgs, message);
       if (messages === msgs) return s;
+      const pagination = s.chatPagination[sessionId];
       return {
         chatMessages: { ...s.chatMessages, [sessionId]: messages },
         lastMessages: {
           ...s.lastMessages,
           [sessionId]: messages[messages.length - 1],
         },
-        liveAssistantMessageId:
-          liveId && adoptedFromId && liveId === adoptedFromId
-            ? { ...s.liveAssistantMessageId, [sessionId]: message.id }
-            : s.liveAssistantMessageId,
+        ...(pagination && !existed
+          ? {
+              chatPagination: {
+                ...s.chatPagination,
+                [sessionId]: {
+                  ...pagination,
+                  totalCount: pagination.totalCount + 1,
+                },
+              },
+            }
+          : {}),
       };
     }),
   runningSetupScripts: {},
@@ -548,12 +552,17 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
       // before the first delta. Other types ignore empty parts.
       if (!part.text && part.type !== "thinking" && part.type !== "text") return s;
       const msgs = s.chatMessages[sessionId] || [];
+      const byId = part.id ? msgs.findIndex((msg) => msg.id === part.id) : -1;
       const liveId = s.liveAssistantMessageId[sessionId];
-      const liveIdx = liveId
-        ? msgs.findIndex((msg) => msg.id === liveId)
-        : -1;
+      const liveIdx =
+        byId >= 0
+          ? byId
+          : part.id
+            ? -1
+            : liveId
+              ? msgs.findIndex((msg) => msg.id === liveId)
+              : -1;
       if (liveIdx >= 0) {
-        if (!part.text) return s;
         const msg = msgs[liveIdx]!;
         const updated = {
           ...msg,
@@ -570,9 +579,13 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
         return {
           chatMessages: { ...s.chatMessages, [sessionId]: nextMsgs },
           lastMessages: { ...s.lastMessages, [sessionId]: updated },
+          liveAssistantMessageId: {
+            ...s.liveAssistantMessageId,
+            [sessionId]: msg.id,
+          },
         };
       }
-      const id = crypto.randomUUID();
+      const id = part.id ?? crypto.randomUUID();
       const created: ChatMessage = {
         id,
         workspace_id: workspaceId,
@@ -588,6 +601,7 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
         cache_read_tokens: null,
         cache_creation_tokens: null,
       };
+      const pagination = s.chatPagination[sessionId];
       const nextMsgs = [...msgs, created];
       return {
         chatMessages: { ...s.chatMessages, [sessionId]: nextMsgs },
@@ -596,6 +610,17 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
           ...s.liveAssistantMessageId,
           [sessionId]: id,
         },
+        ...(pagination && part.id
+          ? {
+              chatPagination: {
+                ...s.chatPagination,
+                [sessionId]: {
+                  ...pagination,
+                  totalCount: pagination.totalCount + 1,
+                },
+              },
+            }
+          : {}),
       };
     }),
   sealLiveAssistantMessage: (sessionId) =>

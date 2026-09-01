@@ -337,6 +337,18 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_chat_message_thinking(
+        &self,
+        id: &str,
+        thinking: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE chat_messages SET thinking = ?1 WHERE id = ?2",
+            params![thinking, id],
+        )?;
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub fn update_chat_message_cost(
         &self,

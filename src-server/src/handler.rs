@@ -991,6 +991,7 @@ pub fn spawn_turn_event_bridge(
                     && let Ok(db) = Database::open(&db_path)
                 {
                     let msg = build_assistant_chat_message(BuildAssistantArgs {
+                        id: None,
                         workspace_id: &ws_id,
                         chat_session_id: &chat_session_id_for_stream,
                         content: full_text,

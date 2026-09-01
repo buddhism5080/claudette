@@ -192,6 +192,8 @@ pub fn append_pending_thinking(buffer: &mut Option<String>, chunk: &str) {
 /// the call-site readable and to leave room for future fields without a
 /// signature break.
 pub struct BuildAssistantArgs<'a> {
+    /// When set, persist this id so the live row and the DB row are the same.
+    pub id: Option<String>,
     pub workspace_id: &'a str,
     pub chat_session_id: &'a str,
     /// Joined text from [`extract_assistant_text`].
@@ -244,6 +246,7 @@ pub fn assistant_usage_fields_from_result(usage: &TokenUsage) -> AssistantUsageF
 /// Maps `TokenUsage` into the four per-message token fields when present.
 pub fn build_assistant_chat_message(args: BuildAssistantArgs<'_>) -> ChatMessage {
     let BuildAssistantArgs {
+        id,
         workspace_id,
         chat_session_id,
         content,
@@ -252,7 +255,7 @@ pub fn build_assistant_chat_message(args: BuildAssistantArgs<'_>) -> ChatMessage
         created_at,
     } = args;
     ChatMessage {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         workspace_id: workspace_id.to_string(),
         chat_session_id: chat_session_id.to_string(),
         role: ChatRole::Assistant,
@@ -879,6 +882,7 @@ mod tests {
 
     fn args(content: &str, usage: Option<TokenUsage>) -> BuildAssistantArgs<'static> {
         BuildAssistantArgs {
+            id: None,
             workspace_id: "ws-1",
             chat_session_id: "cs-1",
             content: content.into(),
@@ -924,6 +928,14 @@ mod tests {
         a.thinking = Some("planning…".into());
         let m = build_assistant_chat_message(a);
         assert_eq!(m.thinking.as_deref(), Some("planning…"));
+    }
+
+    #[test]
+    fn build_assistant_message_uses_explicit_id() {
+        let mut a = args("hello", None);
+        a.id = Some("row-1".into());
+        let m = build_assistant_chat_message(a);
+        assert_eq!(m.id, "row-1");
     }
 
     #[test]

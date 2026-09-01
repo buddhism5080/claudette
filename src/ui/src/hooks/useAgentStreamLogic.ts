@@ -201,115 +201,15 @@ function mergeAssistantFields<
   };
 }
 
-/**
- * Bind a DB assistant row onto the live transcript.
- *
- * Live (`mode: "turn"`, default): the persist is the block that just
- * finished. Attach it to the current turn's matching block — thinking-only
- * → last empty-content assistant; text → last content assistant — never
- * search earlier turns or match on string prefixes.
- *
- * Reload (`mode: "reload"`): id or exact content only. No append, no prefix.
- */
-export function adoptPersistedAssistantIntoLive<
-  T extends { id: string; role: string; content: string; thinking?: string | null },
->(
-  live: T[],
-  persisted: T,
-  opts: {
-    appendIfMissing?: boolean;
-    liveId?: string | null;
-    mode?: "turn" | "reload";
-  } = {},
-): { messages: T[]; adoptedFromId: string | null } {
-  const mode = opts.mode ?? "turn";
-  const appendIfMissing =
-    opts.appendIfMissing !== undefined
-      ? opts.appendIfMissing
-      : mode !== "reload";
-  if (persisted.role !== "Assistant") {
-    if (live.some((msg) => msg.id === persisted.id)) {
-      return { messages: live, adoptedFromId: persisted.id };
-    }
-    return {
-      messages: appendIfMissing ? [...live, persisted] : live,
-      adoptedFromId: null,
-    };
-  }
-
-  const mergeAt = (idx: number) => {
-    const oldId = live[idx]!.id;
-    const messages = live.map((msg, i) =>
-      i === idx ? mergeAssistantFields(msg, persisted) : msg,
-    );
-    return { messages, adoptedFromId: oldId };
-  };
-
-  const sameId = live.findIndex((msg) => msg.id === persisted.id);
-  if (sameId >= 0) return mergeAt(sameId);
-
-  if (mode === "reload") {
-    const exact = persisted.content.trim();
-    if (exact) {
-      for (let i = 0; i < live.length; i++) {
-        const msg = live[i]!;
-        if (msg.role === "Assistant" && msg.content.trim() === exact) {
-          return mergeAt(i);
-        }
-      }
-    } else {
-      const persistedThinking = (persisted.thinking || "").trim();
-      for (let i = 0; i < live.length; i++) {
-        const msg = live[i]!;
-        if (
-          msg.role === "Assistant" &&
-          !msg.content.trim() &&
-          (msg.thinking || "").trim() === persistedThinking
-        ) {
-          return mergeAt(i);
-        }
-      }
-    }
-    return {
-      messages: appendIfMissing ? [...live, persisted] : live,
-      adoptedFromId: null,
-    };
-  }
-
-  const turnStart = lastUserIndex(live) + 1;
-  const persistedText = persisted.content.trim();
-  const findLastInTurn = (pred: (msg: T) => boolean) => {
-    for (let i = live.length - 1; i >= turnStart; i--) {
-      const msg = live[i]!;
-      if (msg.role === "Assistant" && pred(msg)) return i;
-    }
-    return -1;
-  };
-
-  let idx = -1;
-  if (opts.liveId) {
-    const liveIdx = live.findIndex((msg) => msg.id === opts.liveId);
-    if (
-      liveIdx >= turnStart &&
-      live[liveIdx]?.role === "Assistant" &&
-      (!persistedText
-        ? !live[liveIdx]!.content.trim()
-        : !!live[liveIdx]!.content.trim() || live[liveIdx]!.id === opts.liveId)
-    ) {
-      idx = liveIdx;
-    }
-  }
-  if (idx < 0) {
-    idx = persistedText
-      ? findLastInTurn((msg) => !!msg.content.trim())
-      : findLastInTurn((msg) => !msg.content.trim());
-  }
-  if (idx >= 0) return mergeAt(idx);
-
-  return {
-    messages: appendIfMissing ? [...live, persisted] : live,
-    adoptedFromId: null,
-  };
+/** Same id → merge (keep live text if persist is still empty). New id → append. Never match by content. */
+export function upsertPersistedMessageById<
+  T extends { id: string; content: string; thinking?: string | null },
+>(live: T[], persisted: T): T[] {
+  const idx = live.findIndex((msg) => msg.id === persisted.id);
+  if (idx < 0) return [...live, persisted];
+  return live.map((msg, i) =>
+    i === idx ? mergeAssistantFields(msg, persisted) : msg,
+  );
 }
 
 /** Fill thinking on this turn's thinking row (empty content), not an older text row. */
@@ -347,19 +247,4 @@ export function applyCompleteAssistantThinking<
   const existing = msgs[idx]!.thinking || "";
   if (existing.trim()) return msgs;
   return msgs.map((msg, i) => (i === idx ? { ...msg, thinking } : msg));
-}
-
-/** Checkpoint reload must keep live arrival order. Only swap DB ids / thinking. */
-export function reattachPersistedAssistantsKeepingLiveOrder<
-  T extends { id: string; role: string; content: string; thinking?: string | null },
->(live: T[], dbMessages: T[]): T[] {
-  let next = live;
-  for (const dbMsg of dbMessages) {
-    if (dbMsg.role !== "Assistant") continue;
-    next = adoptPersistedAssistantIntoLive(next, dbMsg, {
-      mode: "reload",
-      appendIfMissing: false,
-    }).messages;
-  }
-  return mergeReloadedAssistantThinking(next, live, "");
 }

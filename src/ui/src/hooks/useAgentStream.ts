@@ -402,8 +402,12 @@ export function useAgentStream() {
     let active = true;
     const unlisten = listen<AgentStreamPayload>("agent-stream", (event) => {
       if (!active) return;
-      const { workspace_id: wsId, chat_session_id: sessionId, event: agentEvent } =
-        event.payload;
+      const {
+        workspace_id: wsId,
+        chat_session_id: sessionId,
+        event: agentEvent,
+        persisted_message_id: persistedMessageId,
+      } = event.payload;
 
       if ("ProcessExited" in agentEvent) {
         debugChat("stream", "ProcessExited", {
@@ -775,6 +779,7 @@ export function useAgentStream() {
                     appendLiveAssistantPart(sessionId, wsId, {
                       type: "thinking",
                       text: "",
+                      id: persistedMessageId ?? undefined,
                     });
                   }
                   if (
@@ -790,6 +795,7 @@ export function useAgentStream() {
                     appendLiveAssistantPart(sessionId, wsId, {
                       type: "text",
                       text: "",
+                      id: persistedMessageId ?? undefined,
                     });
                   }
                   if (
@@ -1265,7 +1271,7 @@ export function useAgentStream() {
 
       // Persist tool activities for replay after app restart. Do not
       // loadChatHistory / setChatMessages — live chatMessages is the
-      // transcript; DB ids are adopted via chat-message as rows persist.
+      // transcript; live rows already use the DB id from block start.
       const currentActivities = useAppStore.getState().toolActivities[sessionId] || [];
       debugChat("stream", "checkpoint-created", {
         sessionId,
@@ -1389,15 +1395,15 @@ export function useAgentStream() {
 
   // Backend-authored chat messages that are not tied to the normal GUI send
   // path. Claude Remote Control uses this for remote-origin user prompts.
-  const adoptPersistedAssistantMessage = useAppStore(
-    (s) => s.adoptPersistedAssistantMessage,
+  const upsertPersistedChatMessage = useAppStore(
+    (s) => s.upsertPersistedChatMessage,
   );
   useEffect(() => {
     let active = true;
     const unlisten = listen<ChatMessage>("chat-message", (event) => {
       if (!active) return;
       if (event.payload.role === "Assistant") {
-        adoptPersistedAssistantMessage(
+        upsertPersistedChatMessage(
           event.payload.chat_session_id,
           event.payload,
         );
@@ -1409,7 +1415,7 @@ export function useAgentStream() {
       active = false;
       unlisten.then((fn) => fn());
     };
-  }, [addChatMessage, adoptPersistedAssistantMessage]);
+  }, [addChatMessage, upsertPersistedChatMessage]);
 
   // Listen for agent-authored attachments delivered via the
   // `mcp__claudette__send_to_user` tool. The Rust bridge has already

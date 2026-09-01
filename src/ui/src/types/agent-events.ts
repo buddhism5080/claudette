@@ -5,6 +5,8 @@ export interface AgentStreamPayload {
   workspace_id: string;
   chat_session_id: string;
   event: AgentEvent;
+  /** DB id of the assistant row opened for this thinking/text block. */
+  persisted_message_id?: string | null;
 }
 
 export type AgentEvent =

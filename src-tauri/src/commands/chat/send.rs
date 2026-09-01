@@ -2560,6 +2560,8 @@ pub async fn send_chat_message(
         // to the user message ID for tool-only turns (AskUserQuestion, plan
         // approval) so that checkpoint creation isn't skipped entirely.
         let mut last_assistant_msg_id: Option<String> = None;
+        let mut open_thinking_id: Option<String> = None;
+        let mut open_text_id: Option<String> = None;
         // Accumulate thinking from thinking-only assistant events so it can
         // be attached to the next text-bearing assistant message. The CLI
         // may fire a thinking-only event followed by a text-only event.
@@ -2790,26 +2792,33 @@ pub async fn send_chat_message(
                 if claudette::mcp_supervisor::extract_mcp_server_name(name).is_some() {
                     mcp_tool_names.insert(id.clone(), name.clone());
                 }
-                // One transcript row per thinking block, in arrival order,
-                // so reload/fork/checkpoint keep the block that sat before
-                // this tool. Not a glue row to merge onto later text.
-                if let Some(thinking) = pending_thinking.take()
-                    && let Ok(db) = Database::open(&db_path)
-                    && let Some(msg) = persist_assistant_chat_message(
-                        &db,
-                        BuildAssistantArgs {
-                            workspace_id: &ws_id,
-                            chat_session_id: &chat_session_id_for_stream,
-                            content: String::new(),
-                            thinking: Some(thinking),
-                            usage: None,
-                            created_at: now_iso(),
-                        },
-                    )
-                {
-                    last_assistant_msg_id = Some(msg.id.clone());
-                    thinking_flushed = true;
-                    let _ = app.emit("chat-message", &msg);
+                // Thinking already has a row from content_block_start. Write
+                // the accumulated text onto that id — do not insert another.
+                if let Some(thinking) = pending_thinking.take() {
+                    if let Some(row_id) = open_thinking_id.as_deref()
+                        && let Ok(db) = Database::open(&db_path)
+                    {
+                        let _ = db.update_chat_message_thinking(row_id, &thinking);
+                        last_assistant_msg_id = Some(row_id.to_string());
+                        thinking_flushed = true;
+                    } else if let Ok(db) = Database::open(&db_path)
+                        && let Some(msg) = persist_assistant_chat_message(
+                            &db,
+                            BuildAssistantArgs {
+                                id: None,
+                                workspace_id: &ws_id,
+                                chat_session_id: &chat_session_id_for_stream,
+                                content: String::new(),
+                                thinking: Some(thinking),
+                                usage: None,
+                                created_at: now_iso(),
+                            },
+                        )
+                    {
+                        last_assistant_msg_id = Some(msg.id.clone());
+                        thinking_flushed = true;
+                        let _ = app.emit("chat-message", &msg);
+                    }
                 }
             }
 
@@ -3214,6 +3223,56 @@ pub async fn send_chat_message(
                 append_pending_thinking(&mut pending_thinking, thinking);
             }
 
+            let mut persisted_message_id: Option<String> = None;
+            if let AgentEvent::Stream(StreamEvent::Stream {
+                event: InnerStreamEvent::MessageStart {},
+            }) = &event
+            {
+                open_thinking_id = None;
+                open_text_id = None;
+            }
+            if let AgentEvent::Stream(StreamEvent::Stream {
+                event:
+                    InnerStreamEvent::ContentBlockStart {
+                        content_block: Some(block),
+                        ..
+                    },
+            }) = &event
+            {
+                let kind = match block {
+                    StartContentBlock::Thinking {} => Some("thinking"),
+                    StartContentBlock::Text {} => Some("text"),
+                    _ => None,
+                };
+                if let Some(kind) = kind
+                    && let Ok(db) = Database::open(&db_path)
+                    && let Some(msg) = persist_assistant_chat_message(
+                        &db,
+                        BuildAssistantArgs {
+                            id: None,
+                            workspace_id: &ws_id,
+                            chat_session_id: &chat_session_id_for_stream,
+                            content: String::new(),
+                            thinking: if kind == "thinking" {
+                                Some(String::new())
+                            } else {
+                                None
+                            },
+                            usage: None,
+                            created_at: now_iso(),
+                        },
+                    )
+                {
+                    last_assistant_msg_id = Some(msg.id.clone());
+                    persisted_message_id = Some(msg.id.clone());
+                    if kind == "thinking" {
+                        open_thinking_id = Some(msg.id);
+                    } else {
+                        open_text_id = Some(msg.id);
+                    }
+                }
+            }
+
             if let AgentEvent::ProcessExited(code) = &event {
                 let exit_code = *code;
                 let app_state = app.state::<AppState>();
@@ -3324,10 +3383,8 @@ pub async fn send_chat_message(
                 drop(agents);
                 crate::tray::rebuild_tray(&app);
             }
-            // Persist assistant messages. Thinking-only rows are saved when
-            // a tool_use already flushed them; this path saves text (with
-            // any remaining thinking) and thinking-only events that never
-            // hit a tool. checkpoint.message_id must always be a real row.
+            // Fill rows opened at content_block_start. Insert only when the
+            // CLI skipped partials so no live id exists yet.
             if let AgentEvent::Stream(StreamEvent::Assistant { ref message }) = event {
                 let full_text = extract_assistant_text(message);
                 if auth_failure_message_from_assistant_text(&full_text).is_some() {
@@ -3341,28 +3398,54 @@ pub async fn send_chat_message(
                 }
 
                 let has_text = !full_text.trim().is_empty();
-                let thinking = if has_text || !thinking_flushed {
-                    pending_thinking.take()
-                } else {
-                    None
-                };
-                if (has_text || thinking.as_ref().is_some_and(|t| !t.trim().is_empty()))
+                if let Some(row_id) = open_thinking_id.as_deref()
+                    && let Some(thinking) = pending_thinking.take()
                     && let Ok(db) = Database::open(&db_path)
-                    && let Some(msg) = persist_assistant_chat_message(
-                        &db,
-                        BuildAssistantArgs {
-                            workspace_id: &ws_id,
-                            chat_session_id: &chat_session_id_for_stream,
-                            content: full_text,
-                            thinking,
-                            usage: latest_usage.take(),
-                            created_at: now_iso(),
-                        },
-                    )
                 {
-                    last_assistant_msg_id = Some(msg.id.clone());
-                    thinking_flushed = !has_text;
-                    let _ = app.emit("chat-message", &msg);
+                    let _ = db.update_chat_message_thinking(row_id, &thinking);
+                    last_assistant_msg_id = Some(row_id.to_string());
+                    thinking_flushed = true;
+                }
+                if let Some(row_id) = open_text_id.as_deref()
+                    && has_text
+                    && let Ok(db) = Database::open(&db_path)
+                {
+                    let _ = db.update_chat_message_content(row_id, &full_text);
+                    if let Some(usage) = latest_usage.take() {
+                        let _ = db.update_chat_message_usage_if_missing(
+                            row_id,
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cache_read_input_tokens,
+                            usage.cache_creation_input_tokens,
+                        );
+                    }
+                    last_assistant_msg_id = Some(row_id.to_string());
+                } else if open_text_id.is_none() && open_thinking_id.is_none() {
+                    let thinking = if has_text || !thinking_flushed {
+                        pending_thinking.take()
+                    } else {
+                        None
+                    };
+                    if (has_text || thinking.as_ref().is_some_and(|t| !t.trim().is_empty()))
+                        && let Ok(db) = Database::open(&db_path)
+                        && let Some(msg) = persist_assistant_chat_message(
+                            &db,
+                            BuildAssistantArgs {
+                                id: None,
+                                workspace_id: &ws_id,
+                                chat_session_id: &chat_session_id_for_stream,
+                                content: full_text,
+                                thinking,
+                                usage: latest_usage.take(),
+                                created_at: now_iso(),
+                            },
+                        )
+                    {
+                        last_assistant_msg_id = Some(msg.id.clone());
+                        thinking_flushed = !has_text;
+                        let _ = app.emit("chat-message", &msg);
+                    }
                 }
             }
 
@@ -3377,9 +3460,14 @@ pub async fn send_chat_message(
                 if let Ok(db) = Database::open(&db_path)
                     && let Some(thinking) = pending_thinking.take()
                     && !thinking.trim().is_empty()
-                    && let Some(msg) = persist_assistant_chat_message(
+                {
+                    if let Some(row_id) = open_thinking_id.as_deref() {
+                        let _ = db.update_chat_message_thinking(row_id, &thinking);
+                        last_assistant_msg_id = Some(row_id.to_string());
+                    } else if let Some(msg) = persist_assistant_chat_message(
                         &db,
                         BuildAssistantArgs {
+                            id: None,
                             workspace_id: &ws_id,
                             chat_session_id: &chat_session_id_for_stream,
                             content: String::new(),
@@ -3387,10 +3475,10 @@ pub async fn send_chat_message(
                             usage: None,
                             created_at: now_iso(),
                         },
-                    )
-                {
-                    last_assistant_msg_id = Some(msg.id.clone());
-                    let _ = app.emit("chat-message", &msg);
+                    ) {
+                        last_assistant_msg_id = Some(msg.id.clone());
+                        let _ = app.emit("chat-message", &msg);
+                    }
                 }
                 thinking_flushed = false;
                 if let Ok(db) = Database::open(&db_path)
@@ -3445,6 +3533,7 @@ pub async fn send_chat_message(
                 workspace_id: ws_id.clone(),
                 chat_session_id: chat_session_id_for_stream.clone(),
                 event,
+                persisted_message_id,
             };
             let _ = app.emit("agent-stream", &payload);
         }

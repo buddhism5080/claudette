@@ -1049,6 +1049,7 @@ async fn ensure_remote_control_monitor(
                     && let Ok(db) = Database::open(&db_path)
                 {
                     let msg = build_assistant_chat_message(BuildAssistantArgs {
+                        id: None,
                         workspace_id: &workspace_id,
                         chat_session_id: &chat_session_id,
                         content: full_text,
@@ -1227,6 +1228,7 @@ fn emit_agent_stream(
         workspace_id: workspace_id.to_string(),
         chat_session_id: chat_session_id.to_string(),
         event,
+        persisted_message_id: None,
     };
     let _ = app.emit("agent-stream", &payload);
 }

@@ -67,6 +67,8 @@ pub(crate) struct AgentStreamPayload {
     pub workspace_id: String,
     pub chat_session_id: String,
     pub event: AgentEvent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persisted_message_id: Option<String>,
 }
 
 /// How long to wait between emitting `agent-permission-prompt` and firing the

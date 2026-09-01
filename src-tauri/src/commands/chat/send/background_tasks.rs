@@ -1163,6 +1163,7 @@ pub(super) fn schedule_background_task_wake(
                     && let Ok(db) = Database::open(&db_path)
                 {
                     let msg = build_assistant_chat_message(BuildAssistantArgs {
+                        id: None,
                         workspace_id: &workspace_id,
                         chat_session_id: &chat_session_id,
                         content: full_text,
@@ -1210,6 +1211,7 @@ pub(super) fn schedule_background_task_wake(
                 workspace_id: workspace_id.clone(),
                 chat_session_id: chat_session_id.clone(),
                 event,
+                persisted_message_id: None,
             };
             let _ = app.emit("agent-stream", &payload);
 
