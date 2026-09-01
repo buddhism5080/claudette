@@ -5,6 +5,7 @@ pub mod codex_app_server;
 mod environment;
 pub mod harness;
 pub mod history_seeder;
+pub mod jsonl_clone;
 mod naming;
 mod process;
 mod session;
@@ -31,8 +32,8 @@ pub use harness::{
     PersistentSessionStart,
 };
 pub use naming::{
-    claude_session_transcript_exists, generate_branch_name, generate_session_name,
-    persist_claude_custom_title, sanitize_branch_name,
+    claude_session_transcript_exists, claude_transcript_path, generate_branch_name,
+    generate_session_name, persist_claude_custom_title, sanitize_branch_name,
 };
 pub use process::{AgentEvent, TurnHandle, run_turn, stop_agent, stop_agent_graceful};
 pub use session::PersistentSession;

@@ -1057,6 +1057,7 @@ pub fn spawn_turn_event_bridge(
                     anchor_msg_id,
                     worktree_path: &wt_path,
                     created_at: now_iso(),
+                    claude_session_id: None,
                 })
                 .await
                 {

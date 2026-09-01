@@ -1100,6 +1100,7 @@ async fn ensure_remote_control_monitor(
                         anchor_msg_id,
                         worktree_path: &worktree_path,
                         created_at: now_iso(),
+                        claude_session_id: None,
                     })
                     .await
                 {

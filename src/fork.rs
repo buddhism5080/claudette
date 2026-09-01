@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::agent::jsonl_clone::write_rebound_prefix;
 use crate::db::Database;
 use crate::git;
 use crate::model::{
@@ -305,6 +306,8 @@ async fn fork_after_worktree(
             src_wt,
             &actual_path,
             &projects_dir,
+            checkpoint.jsonl_byte_len,
+            checkpoint.jsonl_session_id.as_deref(),
         )?
     } else {
         false
@@ -404,6 +407,8 @@ fn copy_history(
             turn_index: cp.turn_index,
             message_count: cp.message_count,
             created_at: String::new(),
+            jsonl_byte_len: cp.jsonl_byte_len,
+            jsonl_session_id: cp.jsonl_session_id.clone(),
         };
         db.insert_checkpoint(&new_cp)?;
 
@@ -472,9 +477,9 @@ fn copy_history(
     Ok(())
 }
 
-/// Copy Claude CLI's JSONL session transcript from the source workspace's
-/// project directory to the new workspace's project directory, so the
-/// forked workspace can `--resume` from the same session history.
+/// Copy a checkpoint-sized prefix of Claude CLI's JSONL onto a new session
+/// id in the destination worktree, so the fork can `--resume` without the
+/// turns after the chosen checkpoint.
 ///
 /// Operates at the chat-session granularity: the source id is the chat
 /// session the chosen checkpoint was taken in, and the destination is the
@@ -490,11 +495,11 @@ fn copy_history(
 /// `copy_claude_session_skips_when_jsonl_missing`) at the bottom of this
 /// file for the regression pins.
 ///
-/// Returns `true` if the transcript was found and copied (session id is
-/// persisted for the new chat session). Returns `false` if there was no
-/// session to resume — in that case the new workspace simply starts a
-/// fresh Claude session on its first turn, which is the intended graceful
-/// degradation rather than an error.
+/// Returns `true` if a recorded JSONL prefix was rebound onto a new sid
+/// (session id is persisted for the new chat session). Returns `false` if
+/// there was no prefix to copy — in that case the new workspace starts a
+/// fresh Claude session on its first turn rather than replaying turns
+/// after the checkpoint. That is the intended graceful degradation.
 fn copy_claude_session(
     db: &Database,
     source_chat_session_id: &str,
@@ -502,11 +507,21 @@ fn copy_claude_session(
     source_worktree: &str,
     new_worktree: &str,
     projects_dir: &Path,
+    jsonl_byte_len: Option<i64>,
+    jsonl_session_id: Option<&str>,
 ) -> Result<bool, ForkError> {
     let Some(source_session) = db.get_chat_session(source_chat_session_id)? else {
         return Ok(false);
     };
-    let Some(session_id) = source_session.session_id else {
+    let source_claude_sid = jsonl_session_id
+        .map(str::to_string)
+        .or(source_session.session_id);
+    let Some(session_id) = source_claude_sid.filter(|s| !s.trim().is_empty()) else {
+        return Ok(false);
+    };
+    let Some(prefix_len) = jsonl_byte_len.filter(|n| *n > 0) else {
+        // No recorded prefix: do not copy the whole JSONL (it still has
+        // turns after the fork checkpoint).
         return Ok(false);
     };
     let turn_count = source_session.turn_count;
@@ -517,12 +532,13 @@ fn copy_claude_session(
     if !src_file.exists() {
         return Ok(false);
     }
+    let dest_sid = uuid::Uuid::new_v4().to_string();
     let dest_dir = projects_dir.join(claude_project_slug(new_worktree));
-    std::fs::create_dir_all(&dest_dir)?;
-    let dest_file = dest_dir.join(format!("{session_id}.jsonl"));
-    std::fs::copy(&src_file, &dest_file)?;
+    let dest_file = dest_dir.join(format!("{dest_sid}.jsonl"));
+    write_rebound_prefix(&src_file, &dest_file, prefix_len as u64, &dest_sid)
+        .map_err(ForkError::Snapshot)?;
 
-    db.save_chat_session_state(new_chat_session_id, &session_id, turn_count)?;
+    db.save_chat_session_state(new_chat_session_id, &dest_sid, turn_count)?;
     Ok(true)
 }
 
@@ -703,6 +719,8 @@ mod tests {
             turn_index: turn,
             message_count: 0,
             created_at: String::new(),
+            jsonl_byte_len: None,
+            jsonl_session_id: None,
         }
     }
 
@@ -922,32 +940,38 @@ mod tests {
         let projects = tempfile::tempdir().unwrap();
         let src_wt = "/tmp/wt/src";
         let new_wt = "/tmp/wt/src-fork";
-        write_fake_jsonl(projects.path(), src_wt, "claude-sid-XYZ", "{\"hi\":1}\n");
+        let body = "{\"type\":\"user\",\"sessionId\":\"claude-sid-XYZ\",\"uuid\":\"u1\"}\n";
+        write_fake_jsonl(projects.path(), src_wt, "claude-sid-XYZ", body);
 
-        let resumed =
-            copy_claude_session(&db, &src_sid, &dst_sid, src_wt, new_wt, projects.path()).unwrap();
+        let resumed = copy_claude_session(
+            &db,
+            &src_sid,
+            &dst_sid,
+            src_wt,
+            new_wt,
+            projects.path(),
+            Some(body.len() as i64),
+            Some("claude-sid-XYZ"),
+        )
+        .unwrap();
         assert!(
             resumed,
-            "expected session_resumed=true when source has a sid + jsonl"
+            "expected session_resumed=true when source has a sid + jsonl prefix"
         );
 
-        // JSONL physically copied into the new worktree's project dir under
-        // the SAME session id (Claude CLI keys files by sid; resume reads it).
-        let copied = projects
-            .path()
-            .join(claude_project_slug(new_wt))
-            .join("claude-sid-XYZ.jsonl");
-        assert!(
-            copied.exists(),
-            "fork's jsonl missing at {}",
-            copied.display()
-        );
-        assert_eq!(std::fs::read_to_string(&copied).unwrap(), "{\"hi\":1}\n");
+        let dest_dir = projects.path().join(claude_project_slug(new_wt));
+        let copied: Vec<_> = std::fs::read_dir(&dest_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(copied.len(), 1, "fork writes one rebound jsonl");
+        let copied_text = std::fs::read_to_string(&copied[0]).unwrap();
+        assert!(copied_text.contains("\"sessionId\":\""));
+        assert!(!copied_text.contains("claude-sid-XYZ"));
+        assert!(copied_text.contains("\"uuid\":\"u1\""));
 
-        // The destination chat session inherits the parent's sid + turn count
-        // so the next agent run hits `claude --resume` with the right id.
         let dst_session = db.get_chat_session(&dst_sid).unwrap().unwrap();
-        assert_eq!(dst_session.session_id.as_deref(), Some("claude-sid-XYZ"));
+        assert_ne!(dst_session.session_id.as_deref(), Some("claude-sid-XYZ"));
         assert_eq!(dst_session.turn_count, 7);
     }
 
@@ -979,6 +1003,8 @@ mod tests {
             "/tmp/wt/src",
             "/tmp/wt/src-fork",
             projects.path(),
+            None,
+            None,
         )
         .unwrap();
         assert!(!resumed);
@@ -1016,27 +1042,36 @@ mod tests {
         let projects = tempfile::tempdir().unwrap();
         let src_wt = "/Users/alice/.claudette/workspaces/repo/src";
         let new_wt = "/Users/alice/.claudette/workspaces/repo/src-fork";
-        write_fake_jsonl(projects.path(), src_wt, "claude-sid-DOTS", "X");
+        let body = "{\"type\":\"user\",\"sessionId\":\"claude-sid-DOTS\"}\n";
+        write_fake_jsonl(projects.path(), src_wt, "claude-sid-DOTS", body);
 
-        let resumed =
-            copy_claude_session(&db, &src_sid, &dst_sid, src_wt, new_wt, projects.path()).unwrap();
+        let resumed = copy_claude_session(
+            &db,
+            &src_sid,
+            &dst_sid,
+            src_wt,
+            new_wt,
+            projects.path(),
+            Some(body.len() as i64),
+            Some("claude-sid-DOTS"),
+        )
+        .unwrap();
         assert!(
             resumed,
             "fork must resume sessions for .claudette-style paths — slug must replace '.'"
         );
-        let copied = projects
-            .path()
-            .join(claude_project_slug(new_wt))
-            .join("claude-sid-DOTS.jsonl");
-        assert!(copied.exists());
-        // The slug must have collapsed `/.claudette` → `--claudette`,
-        // matching Claude CLI's on-disk layout.
+        let dest_dir = projects.path().join(claude_project_slug(new_wt));
+        let copied: Vec<_> = std::fs::read_dir(&dest_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(copied.len(), 1);
         assert!(
-            copied
+            copied[0]
                 .to_string_lossy()
                 .contains("-Users-alice--claudette-workspaces-repo-src-fork"),
             "slug missing `--claudette` collapse: {}",
-            copied.display()
+            copied[0].display()
         );
     }
 
@@ -1071,11 +1106,60 @@ mod tests {
             "/tmp/wt/src",
             "/tmp/wt/src-fork",
             projects.path(),
+            None,
+            None,
         )
         .unwrap();
         assert!(!resumed);
         // Destination must NOT have inherited the orphan sid — the next
         // turn would otherwise try (and fail) to --resume a phantom session.
+        let dst_session = db.get_chat_session(&dst_sid).unwrap().unwrap();
+        assert!(dst_session.session_id.is_none());
+    }
+
+    #[test]
+    fn copy_claude_session_skips_without_recorded_prefix() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_repository(&make_repo("r1")).unwrap();
+        db.insert_workspace(&make_workspace("w-src", "r1", "src"))
+            .unwrap();
+        db.insert_workspace(&make_workspace("w-fork", "r1", "src-fork"))
+            .unwrap();
+        let src_sid = db
+            .default_session_id_for_workspace("w-src")
+            .unwrap()
+            .unwrap();
+        let dst_sid = db
+            .default_session_id_for_workspace("w-fork")
+            .unwrap()
+            .unwrap();
+        db.save_chat_session_state(&src_sid, "claude-sid-FULL", 3)
+            .unwrap();
+
+        let projects = tempfile::tempdir().unwrap();
+        let src_wt = "/tmp/wt/src";
+        let new_wt = "/tmp/wt/src-fork";
+        write_fake_jsonl(
+            projects.path(),
+            src_wt,
+            "claude-sid-FULL",
+            "{\"type\":\"user\",\"sessionId\":\"claude-sid-FULL\"}\n",
+        );
+
+        let resumed = copy_claude_session(
+            &db,
+            &src_sid,
+            &dst_sid,
+            src_wt,
+            new_wt,
+            projects.path(),
+            None,
+            Some("claude-sid-FULL"),
+        )
+        .unwrap();
+        assert!(!resumed, "must not copy the whole post-checkpoint JSONL");
+        let dest_dir = projects.path().join(claude_project_slug(new_wt));
+        assert!(!dest_dir.exists() || dest_dir.read_dir().unwrap().next().is_none());
         let dst_session = db.get_chat_session(&dst_sid).unwrap().unwrap();
         assert!(dst_session.session_id.is_none());
     }
@@ -1233,6 +1317,8 @@ mod tests {
             turn_index: 0,
             message_count: 1,
             created_at: String::new(),
+            jsonl_byte_len: None,
+            jsonl_session_id: None,
         })
         .unwrap();
 

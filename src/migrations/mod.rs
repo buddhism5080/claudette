@@ -279,4 +279,9 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("20260814002638_pinned_prompt_launch_options.sql"),
         legacy_version: None,
     },
+    Migration {
+        id: "20260902000000_checkpoint_jsonl_prefix",
+        sql: include_str!("20260902000000_checkpoint_jsonl_prefix.sql"),
+        legacy_version: None,
+    },
 ];

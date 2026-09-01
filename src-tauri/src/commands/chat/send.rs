@@ -15,11 +15,10 @@ use claudette::agent::{
 use claudette::agent_backend::AgentBackendRuntimeHarness;
 use claudette::base64_decode;
 use claudette::chat::{
-    BuildAssistantArgs, CheckpointArgs, RequestedFlags, SessionFlags,
-    assistant_usage_fields_from_result, build_compaction_sentinel,
-    build_permission_response, create_turn_checkpoint, extract_assistant_text,
-    persist_assistant_chat_message, append_pending_thinking, extract_event_thinking,
-    persistent_session_flags_drifted,
+    BuildAssistantArgs, CheckpointArgs, RequestedFlags, SessionFlags, append_pending_thinking,
+    assistant_usage_fields_from_result, build_compaction_sentinel, build_permission_response,
+    create_turn_checkpoint, extract_assistant_text, extract_event_thinking,
+    persist_assistant_chat_message, persistent_session_flags_drifted,
 };
 use claudette::db::Database;
 use claudette::env::WorkspaceEnv;
@@ -523,27 +522,6 @@ fn should_resume_persistent_session(
     !saved_session_id.trim().is_empty() && has_persisted_claude_session
 }
 
-/// When Claude has no transcript (rollback / lost JSONL / app restart after
-/// minting a placeholder sid), seed the next turn from surviving chat rows
-/// so the model still sees the truncated conversation.
-fn seed_missing_transcript_prelude(
-    session: &mut AgentSessionState,
-    messages: &[ChatMessage],
-    current_user_message_id: &str,
-) {
-    if session.pending_history_prelude.is_some() {
-        return;
-    }
-    let prior: Vec<ChatMessage> = messages
-        .iter()
-        .filter(|m| m.id != current_user_message_id)
-        .filter(|m| !matches!(m.role, ChatRole::System))
-        .cloned()
-        .collect();
-    session.pending_history_prelude =
-        claudette::agent::history_seeder::build_migration_prelude(&prior);
-}
-
 /// Resolve the session id to launch claude with, given whether we intend to
 /// resume the saved session or start fresh. When `is_resume` is false we MUST
 /// generate a fresh UUID — passing `--session-id <existing-saved-sid>` to
@@ -1032,6 +1010,7 @@ pub async fn steer_queued_chat_message(
         anchor_msg_id: &anchor_msg_id,
         worktree_path: &worktree_path,
         created_at: now_iso(),
+        claude_session_id: None,
     })
     .await
     .ok_or("Failed to create pre-steer checkpoint")?;
@@ -1323,14 +1302,6 @@ pub async fn send_chat_message(
         // still launches with the same repo-level prompt a normal first turn
         // would have used.
         session.custom_instructions = instructions.clone();
-    }
-    // Old rolled-back sessions (and rollback + app restart) lose the
-    // in-memory prelude. If there is no JSONL to `--resume`, rebuild it
-    // from surviving rows so the next send still has conversation context.
-    if !has_persisted_claude_session && session.pending_history_prelude.is_none() {
-        if let Ok(messages) = db.list_chat_messages_for_session(&chat_session_id) {
-            seed_missing_transcript_prelude(session, &messages, &user_msg.id);
-        }
     }
 
     // Clear any unresolved permission requests so the CLI doesn't hang when
@@ -2456,6 +2427,10 @@ pub async fn send_chat_message(
             let _ = db.set_app_setting("first_session_at", &chrono::Utc::now().to_rfc3339());
         }
     }
+    let claude_sid_for_stream = agents
+        .get(&chat_session_id)
+        .map(|s| s.session_id.clone())
+        .filter(|s| !s.trim().is_empty());
     drop(agents);
 
     // Capture rename context before the bridge spawn.
@@ -2649,6 +2624,20 @@ pub async fn send_chat_message(
                         let _ = db.insert_agent_session(canonical_sid, &ws_id, &repo_id_for_mcp);
                         let _ = db.reopen_agent_session(canonical_sid);
                         let _ = db.update_agent_session_turn(canonical_sid, turn_count);
+                    }
+                }
+                if let Ok(db) = Database::open(&db_path) {
+                    let key = format!("jsonl_purge_sid:{chat_session_id_for_stream}");
+                    if let Ok(Some(old_sid)) = db.get_app_setting(&key) {
+                        let old_sid = old_sid.trim();
+                        if !old_sid.is_empty() {
+                            if let Ok(path) =
+                                claudette::agent::claude_transcript_path(&wt_path, old_sid)
+                            {
+                                let _ = claudette::agent::jsonl_clone::remove_transcript(&path);
+                            }
+                            let _ = db.set_app_setting(&key, "");
+                        }
                     }
                 }
             }
@@ -3425,6 +3414,15 @@ pub async fn send_chat_message(
                 }
 
                 let anchor_msg_id = last_assistant_msg_id.as_deref().unwrap_or(&user_msg_id);
+                let claude_sid_now = {
+                    let app_state = app.state::<AppState>();
+                    let agents = app_state.agents.read().await;
+                    agents
+                        .get(&chat_session_id_for_stream)
+                        .map(|s| s.session_id.clone())
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| claude_sid_for_stream.clone())
+                };
                 if let Some(cp) = create_turn_checkpoint(CheckpointArgs {
                     db_path: &db_path,
                     workspace_id: &ws_id,
@@ -3432,6 +3430,7 @@ pub async fn send_chat_message(
                     anchor_msg_id,
                     worktree_path: &wt_path,
                     created_at: now_iso(),
+                    claude_session_id: claude_sid_now.as_deref(),
                 })
                 .await
                 {
@@ -3465,8 +3464,7 @@ mod tests {
         remote_control_requested_or_active_for_turn,
         remote_control_should_defer_drift_teardown_for_turn,
         remote_control_should_restore_for_turn, remote_control_title, resolve_spawn_session_id,
-        route_control_request_session_state, seed_missing_transcript_prelude,
-        should_reenable_remote_control_after_turn_result,
+        route_control_request_session_state, should_reenable_remote_control_after_turn_result,
         should_resume_persistent_session, should_run_auto_naming,
     };
     use crate::state::{
@@ -3755,32 +3753,6 @@ mod tests {
             should_resume_persistent_session("minted-after-rollback", 1, true),
             "the footgun: treating a placeholder sid as persisted WOULD resume"
         );
-    }
-
-    #[test]
-    fn missing_jsonl_seeds_prelude_from_surviving_messages() {
-        let mut session = test_agent_session_state();
-        let mut prior = test_chat_message(ChatRole::User, "what is the bug");
-        prior.id = "old-user".into();
-        let mut reply = test_chat_message(ChatRole::Assistant, "invalid uuid on resume");
-        reply.id = "old-asst".into();
-        let mut current = test_chat_message(ChatRole::User, "try again");
-        current.id = "new-user".into();
-        seed_missing_transcript_prelude(
-            &mut session,
-            &[prior, reply, current.clone()],
-            &current.id,
-        );
-        let prelude = session
-            .pending_history_prelude
-            .clone()
-            .expect("prelude");
-        assert!(prelude.contains("what is the bug"));
-        assert!(prelude.contains("invalid uuid on resume"));
-        assert!(!prelude.contains("try again"));
-        let existing = session.pending_history_prelude.clone();
-        seed_missing_transcript_prelude(&mut session, &[], "x");
-        assert_eq!(session.pending_history_prelude, existing);
     }
 
     #[test]

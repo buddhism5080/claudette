@@ -131,7 +131,7 @@ fn claude_config_home_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "No home directory found for Claude config".to_string())
 }
 
-fn claude_transcript_path(worktree_path: &str, session_id: &str) -> Result<PathBuf, String> {
+pub fn claude_transcript_path(worktree_path: &str, session_id: &str) -> Result<PathBuf, String> {
     Ok(claude_config_home_dir()?
         .join("projects")
         .join(sanitize_claude_project_path(worktree_path))
@@ -550,7 +550,10 @@ mod tests {
             std::env::set_var("CLAUDE_CONFIG_DIR", &config);
         }
         let wt_str = wt.to_str().unwrap();
-        assert!(!claude_session_transcript_exists(wt_str, "minted-after-rollback"));
+        assert!(!claude_session_transcript_exists(
+            wt_str,
+            "minted-after-rollback"
+        ));
         assert!(!claude_session_transcript_exists(wt_str, ""));
         let path = claude_transcript_path(wt_str, "real-sid").unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -13,6 +13,13 @@ pub struct ConversationCheckpoint {
     pub turn_index: i32,
     pub message_count: i32,
     pub created_at: String,
+    /// Byte length of the Claude CLI JSONL when this checkpoint was taken.
+    /// Rollback copies this prefix onto a new session id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jsonl_byte_len: Option<i64>,
+    /// Claude session id whose JSONL `jsonl_byte_len` refers to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jsonl_session_id: Option<String>,
 }
 
 /// A single file captured in a checkpoint snapshot.

@@ -331,6 +331,8 @@ pub struct CheckpointArgs<'a> {
     pub anchor_msg_id: &'a str,
     pub worktree_path: &'a str,
     pub created_at: String,
+    /// Claude CLI session id to record JSONL prefix length for. Empty skips.
+    pub claude_session_id: Option<&'a str>,
 }
 
 /// Create the conversation checkpoint for a just-completed turn and snapshot
@@ -358,6 +360,7 @@ pub async fn create_turn_checkpoint(args: CheckpointArgs<'_>) -> Option<Conversa
         anchor_msg_id,
         worktree_path,
         created_at,
+        claude_session_id,
     } = args;
 
     let db = Database::open(db_path).ok()?;
@@ -371,6 +374,17 @@ pub async fn create_turn_checkpoint(args: CheckpointArgs<'_>) -> Option<Conversa
 
     let retention_count = read_checkpoint_retention_count(&db);
 
+    let (jsonl_byte_len, jsonl_session_id) = match claude_session_id {
+        Some(sid) if !sid.trim().is_empty() => {
+            let len = crate::agent::claude_transcript_path(worktree_path, sid)
+                .ok()
+                .and_then(|p| p.metadata().ok())
+                .map(|m| m.len() as i64);
+            (len, Some(sid.to_string()))
+        }
+        _ => (None, None),
+    };
+
     let mut checkpoint = ConversationCheckpoint {
         id: uuid::Uuid::new_v4().to_string(),
         workspace_id: workspace_id.to_string(),
@@ -381,6 +395,8 @@ pub async fn create_turn_checkpoint(args: CheckpointArgs<'_>) -> Option<Conversa
         turn_index,
         message_count: 0,
         created_at,
+        jsonl_byte_len,
+        jsonl_session_id,
     };
 
     db.insert_checkpoint(&checkpoint).ok()?;
@@ -1005,6 +1021,7 @@ mod tests {
             anchor_msg_id: "msg-1",
             worktree_path: wt.to_str().unwrap(),
             created_at: "now".into(),
+            claude_session_id: None,
         })
         .await
         .expect("checkpoint");
@@ -1041,6 +1058,8 @@ mod tests {
                 turn_index: 4,
                 message_count: 0,
                 created_at: "earlier".into(),
+                jsonl_byte_len: None,
+                jsonl_session_id: None,
             };
             db.insert_checkpoint(&prior).unwrap();
         }
@@ -1052,6 +1071,7 @@ mod tests {
             anchor_msg_id: "msg-2",
             worktree_path: wt.to_str().unwrap(),
             created_at: "now".into(),
+            claude_session_id: None,
         })
         .await
         .expect("checkpoint");
@@ -1071,6 +1091,7 @@ mod tests {
             anchor_msg_id: "msg-1",
             worktree_path: bogus,
             created_at: "now".into(),
+            claude_session_id: None,
         })
         .await
         .expect("checkpoint inserted even if snapshot fails");
@@ -1102,6 +1123,7 @@ mod tests {
             anchor_msg_id: "msg-1",
             worktree_path: wt.to_str().unwrap(),
             created_at: "now".into(),
+            claude_session_id: None,
         })
         .await
         .expect("checkpoint");

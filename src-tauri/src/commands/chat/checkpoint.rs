@@ -1,10 +1,9 @@
 use tauri::State;
 
-use claudette::agent::history_seeder::build_migration_prelude;
+use claudette::agent::claude_transcript_path;
+use claudette::agent::jsonl_clone::write_rebound_prefix;
 use claudette::db::Database;
-use claudette::model::{
-    ChatMessage, ChatRole, CompletedTurnData, ConversationCheckpoint, TurnToolActivity,
-};
+use claudette::model::{ChatMessage, CompletedTurnData, ConversationCheckpoint, TurnToolActivity};
 use claudette::{agent, git, snapshot};
 
 use crate::state::{AgentSessionState, AppState};
@@ -72,65 +71,59 @@ pub async fn rollback_to_checkpoint(
         }
     }
 
-    // Attempt file restore BEFORE any destructive DB writes so that a
-    // failure does not leave the DB truncated while the frontend still shows
-    // the full conversation.
-    if restore_files {
-        let workspaces = db.list_workspaces().map_err(|e| e.to_string())?;
-        let ws = workspaces
-            .iter()
-            .find(|w| w.id == workspace_id)
-            .ok_or("Workspace not found")?;
-        let wt = ws
-            .worktree_path
-            .as_ref()
-            .ok_or("Workspace has no worktree")?;
+    // File restore and JSONL prefix clone happen BEFORE truncating chat
+    // so a failure cannot leave the transcript cut with no CLI memory.
+    let workspaces = db.list_workspaces().map_err(|e| e.to_string())?;
+    let ws = workspaces
+        .iter()
+        .find(|w| w.id == workspace_id)
+        .ok_or("Workspace not found")?;
+    let wt = ws.worktree_path.as_deref();
 
+    if restore_files {
+        let wt = wt.ok_or("Workspace has no worktree")?;
         if checkpoint.has_file_state {
-            // New path: restore from SQLite snapshot.
             snapshot::restore_snapshot(&state.db_path, &checkpoint_id, wt)
                 .await
                 .map_err(|e| e.to_string())?;
         } else if let Some(ref commit_hash) = checkpoint.commit_hash {
-            // Legacy path: restore from git commit.
             git::restore_to_commit(wt, commit_hash)
                 .await
                 .map_err(|e| e.to_string())?;
         }
     }
 
-    // Now perform the destructive DB writes — safe because the risky git
-    // operation (if requested) has already succeeded above. Scoped to this
-    // session so sibling tabs are untouched.
+    let src_jsonl_sid = checkpoint
+        .jsonl_session_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            let s = persisted_prior_sid.clone();
+            (!s.trim().is_empty()).then_some(s)
+        });
+    let new_claude_sid = uuid::Uuid::new_v4().to_string();
+    let mut cloned_jsonl = false;
+    if let (Some(len), Some(src_sid), Some(wt)) =
+        (checkpoint.jsonl_byte_len, src_jsonl_sid.as_deref(), wt)
+    {
+        if len > 0 {
+            if let (Ok(src_path), Ok(dest_path)) = (
+                claude_transcript_path(wt, src_sid),
+                claude_transcript_path(wt, &new_claude_sid),
+            ) {
+                if src_path.is_file() {
+                    write_rebound_prefix(&src_path, &dest_path, len as u64, &new_claude_sid)
+                        .map_err(|e| format!("Failed to clone Claude transcript: {e}"))?;
+                    cloned_jsonl = true;
+                }
+            }
+        }
+    }
+
     db.delete_session_messages_after(&chat_session_id, &checkpoint.message_id)
         .map_err(|e| e.to_string())?;
     db.delete_session_checkpoints_after(&chat_session_id, checkpoint.turn_index)
         .map_err(|e| e.to_string())?;
-
-    // Rollback discards the messages *after* the checkpoint but the user
-    // still wants the surviving turns to remain part of the agent's
-    // memory on the next send. The prior session's JSONL / Codex /
-    // Pi transcript can't be reused — it still contains the deleted
-    // messages, and resuming it would replay them. So we mint a fresh
-    // sid, zero the turn count, and queue a migration prelude built
-    // from the surviving messages. The next turn's user content gets
-    // the prelude prepended before reaching the harness, exactly the
-    // same wiring as cross-harness migration. Without this step,
-    // rollback would silently lose the agent's memory of everything,
-    // not just the discarded turns — same family of regression as the
-    // model-switch context loss this PR fixes.
-    let surviving_messages: Vec<ChatMessage> = db
-        .list_chat_messages_for_session(&chat_session_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        // System rows are control-flow signals (agent stopped,
-        // synthetic compaction summaries, etc.). They don't carry
-        // conversation context the model should re-read, so filter
-        // them out of the prelude the same way `prepare_cross_harness_migration`
-        // does.
-        .filter(|m| !matches!(m.role, ChatRole::System))
-        .collect();
-    let prelude = build_migration_prelude(&surviving_messages);
 
     let snapshot = {
         let mut agents = state.agents.write().await;
@@ -167,7 +160,12 @@ pub async fn rollback_to_checkpoint(
                 posted_env_trust_warning: false,
                 pending_history_prelude: None,
             });
-        apply_migration_to_session(session, prelude)
+        let snap = apply_migration_to_session(session, None);
+        if cloned_jsonl {
+            session.session_id = new_claude_sid.clone();
+            session.pending_history_prelude = None;
+        }
+        snap
     };
 
     if let Some((ps, drained)) = snapshot.drained_permissions {
@@ -177,30 +175,28 @@ pub async fn rollback_to_checkpoint(
         let _ = agent::stop_agent(pid).await;
     }
 
-    // Retire the prior session's audit row + Pi session dir; record the
-    // new fresh sid (turn_count=0) in chat_sessions so subsequent
-    // `send_chat_message` calls start from a clean slate under the new
-    // sid and find the prelude on the in-memory `AgentSessionState`.
-    // Belt-and-suspenders fallback: if the in-memory snapshot's prior
-    // session id was empty (e.g. an `AgentSessionState` entry existed
-    // but had never been wired to a runtime sid), trust the persisted
-    // `chat_sessions.session_id` we captured up front so we still
-    // retire the row the DB knew about.
     let prior_sid_for_cleanup = if snapshot.prior_session_id.is_empty() {
-        persisted_prior_sid
+        persisted_prior_sid.clone()
     } else {
         snapshot.prior_session_id.clone()
     };
     if !prior_sid_for_cleanup.is_empty() {
         let _ = db.end_agent_session(&prior_sid_for_cleanup, false);
     }
-    // Do not persist the minted UUID as a Claude session id — there is no
-    // JSONL yet. Saving it made the next send `--resume` a missing
-    // transcript and the CLI exited with no API call.
-    db.clear_chat_session_state(&chat_session_id)
-        .map_err(|e| e.to_string())?;
+    if cloned_jsonl {
+        db.save_chat_session_state(&chat_session_id, &new_claude_sid, 0)
+            .map_err(|e| e.to_string())?;
+        if !prior_sid_for_cleanup.is_empty() && prior_sid_for_cleanup != new_claude_sid {
+            let _ = db.set_app_setting(
+                &format!("jsonl_purge_sid:{chat_session_id}"),
+                &prior_sid_for_cleanup,
+            );
+        }
+    } else {
+        db.clear_chat_session_state(&chat_session_id)
+            .map_err(|e| e.to_string())?;
+    }
 
-    // Return the truncated message list for this session.
     db.list_chat_messages_for_session(&chat_session_id)
         .map_err(|e| e.to_string())
 }

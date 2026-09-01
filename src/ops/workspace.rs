@@ -1576,6 +1576,8 @@ mod tests {
             turn_index: 0,
             message_count: 1,
             created_at: String::new(),
+            jsonl_byte_len: None,
+            jsonl_session_id: None,
         })
         .unwrap();
         db.insert_checkpoint_files(&[crate::model::CheckpointFile {

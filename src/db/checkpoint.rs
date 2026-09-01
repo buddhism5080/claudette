@@ -60,8 +60,8 @@ impl Database {
     pub fn insert_checkpoint(&self, cp: &ConversationCheckpoint) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO conversation_checkpoints
-                (id, workspace_id, chat_session_id, message_id, commit_hash, turn_index, message_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (id, workspace_id, chat_session_id, message_id, commit_hash, turn_index, message_count, jsonl_byte_len, jsonl_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 cp.id,
                 cp.workspace_id,
@@ -69,7 +69,9 @@ impl Database {
                 cp.message_id,
                 cp.commit_hash,
                 cp.turn_index,
-                cp.message_count
+                cp.message_count,
+                cp.jsonl_byte_len,
+                cp.jsonl_session_id,
             ],
         )?;
         Ok(())
@@ -86,13 +88,15 @@ impl Database {
             turn_index: row.get(6)?,
             message_count: row.get(7)?,
             created_at: row.get(8)?,
+            jsonl_byte_len: row.get(9)?,
+            jsonl_session_id: row.get(10)?,
         })
     }
 
     /// SQL column list for checkpoint queries, including a subquery for has_file_state.
     const CHECKPOINT_COLS: &str = "id, workspace_id, chat_session_id, message_id, commit_hash, \
          EXISTS(SELECT 1 FROM checkpoint_files WHERE checkpoint_id = conversation_checkpoints.id) AS has_file_state, \
-         turn_index, message_count, created_at";
+         turn_index, message_count, created_at, jsonl_byte_len, jsonl_session_id";
 
     pub fn list_checkpoints(
         &self,
@@ -1555,6 +1559,8 @@ mod tests {
             turn_index: turn,
             message_count: 1,
             created_at: String::new(),
+            jsonl_byte_len: None,
+            jsonl_session_id: None,
         }
     }
 
@@ -1696,6 +1702,26 @@ mod tests {
         let db = setup_db_with_workspace();
         let result = db.latest_checkpoint("w1").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn insert_checkpoint_persists_jsonl_prefix() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+            .unwrap();
+        let mut cp = make_checkpoint(&db, "cp-jsonl", "w1", "m1", 0);
+        cp.jsonl_byte_len = Some(4096);
+        cp.jsonl_session_id = Some("claude-sid-abc".into());
+        db.insert_checkpoint(&cp).unwrap();
+        let got = db.get_checkpoint("cp-jsonl").unwrap().expect("row");
+        assert_eq!(got.jsonl_byte_len, Some(4096));
+        assert_eq!(got.jsonl_session_id.as_deref(), Some("claude-sid-abc"));
+        let listed = db.list_checkpoints("w1").unwrap();
+        assert_eq!(listed[0].jsonl_byte_len, Some(4096));
+        assert_eq!(
+            listed[0].jsonl_session_id.as_deref(),
+            Some("claude-sid-abc")
+        );
     }
 
     // --- Turn tool activity tests ---
@@ -2667,14 +2693,8 @@ mod tests {
         let mut thinking_only = make_chat_msg(&db, "th1", "w1", ChatRole::Assistant, "");
         thinking_only.thinking = Some("plan the read".into());
         db.insert_chat_message(&thinking_only).unwrap();
-        db.insert_chat_message(&make_chat_msg(
-            &db,
-            "a1",
-            "w1",
-            ChatRole::Assistant,
-            "done",
-        ))
-        .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "a1", "w1", ChatRole::Assistant, "done"))
+            .unwrap();
         db.insert_chat_message(&make_chat_msg(&db, "u2", "w1", ChatRole::User, "next"))
             .unwrap();
 
