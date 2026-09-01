@@ -79,3 +79,32 @@ export function timelineHasVisibleContent(
     item.type === "tool" ? true : item.content.length > 0,
   );
 }
+
+export type CollapsedTimelineItem =
+  | { type: "thinking"; id: string; content: string; active: boolean }
+  | { type: "text"; id: string; content: string; active: boolean }
+  | { type: "tools"; id: string; toolUseIds: string[] };
+
+/**
+ * Consecutive tool_use blocks stay one run so grouped rendering can turn
+ * them into "N tool calls" / one MCP server pill. Thinking and text break
+ * the run — that is the API order, not a fixed thinking→text→tools recipe.
+ */
+export function collapseTimelineToolRuns(
+  items: readonly StreamingTimelineItem[],
+): CollapsedTimelineItem[] {
+  const out: CollapsedTimelineItem[] = [];
+  for (const item of items) {
+    if (item.type !== "tool") {
+      out.push(item);
+      continue;
+    }
+    const last = out[out.length - 1];
+    if (last?.type === "tools") {
+      last.toolUseIds.push(item.toolUseId);
+    } else {
+      out.push({ type: "tools", id: item.id, toolUseIds: [item.toolUseId] });
+    }
+  }
+  return out;
+}

@@ -1088,5 +1088,108 @@ describe("MessagesWithTurns live stream order", () => {
     expect(tool).toBeGreaterThan(thinking);
     expect(answer).toBeGreaterThan(tool);
   });
+
+  it("merges consecutive live tools into one grouped pill", async () => {
+    useAppStore.setState({
+      streamingTimeline: {
+        [SESSION_ID]: [
+          { type: "tool", id: "read-1", toolUseId: "read-1" },
+          { type: "tool", id: "bash-1", toolUseId: "bash-1" },
+          { type: "tool", id: "glob-1", toolUseId: "glob-1" },
+        ],
+      },
+      toolActivities: {
+        [SESSION_ID]: [
+          {
+            toolUseId: "read-1",
+            toolName: "Read",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "",
+          },
+          {
+            toolUseId: "bash-1",
+            toolName: "Bash",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "",
+          },
+          {
+            toolUseId: "glob-1",
+            toolName: "Glob",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "",
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "Fix it")]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    expect(container.textContent).toContain("3 tool calls");
+    expect(container.textContent).not.toContain("1 tool call");
+    expect(container.textContent).not.toContain("2 tool calls");
+  });
+
+  it("merges consecutive live calls to the same MCP server", async () => {
+    useAppStore.setState({
+      streamingTimeline: {
+        [SESSION_ID]: [
+          { type: "tool", id: "q1", toolUseId: "q1" },
+          { type: "tool", id: "q2", toolUseId: "q2" },
+        ],
+      },
+      toolActivities: {
+        [SESSION_ID]: [
+          {
+            toolUseId: "q1",
+            toolName: "mcp__postgres__query",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "",
+          },
+          {
+            toolUseId: "q2",
+            toolName: "mcp__postgres__describe_table",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "",
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "inspect db")]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("postgres");
+    expect(text).not.toContain("mcp__postgres__query");
+    expect(text).not.toContain("1 tool call");
+    expect(text.match(/postgres/g)?.length).toBe(1);
+  });
 });
 

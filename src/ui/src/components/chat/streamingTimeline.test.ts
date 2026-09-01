@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   appendStreamingDelta,
+  collapseTimelineToolRuns,
   startStreamingBlock,
   timelineHasVisibleContent,
   toolUseIdsInTimeline,
@@ -71,5 +72,40 @@ describe("streamingTimeline", () => {
       toolUseId: "b",
     });
     expect([...toolUseIdsInTimeline(items)]).toEqual(["a", "b"]);
+  });
+
+  it("collapses consecutive tools into one run and splits around thinking/text", () => {
+    let items = startStreamingBlock([], { type: "thinking", id: "th-0" });
+    items = appendStreamingDelta(items, "thinking", "plan");
+    items = startStreamingBlock(items, {
+      type: "tool",
+      id: "a",
+      toolUseId: "a",
+    });
+    items = startStreamingBlock(items, {
+      type: "tool",
+      id: "b",
+      toolUseId: "b",
+    });
+    items = startStreamingBlock(items, { type: "text", id: "tx-0" });
+    items = appendStreamingDelta(items, "text", "done");
+    items = startStreamingBlock(items, {
+      type: "tool",
+      id: "c",
+      toolUseId: "c",
+    });
+
+    const collapsed = collapseTimelineToolRuns(items);
+    expect(collapsed.map((item) => item.type)).toEqual([
+      "thinking",
+      "tools",
+      "text",
+      "tools",
+    ]);
+    expect(collapsed[1]).toMatchObject({
+      type: "tools",
+      toolUseIds: ["a", "b"],
+    });
+    expect(collapsed[3]).toMatchObject({ type: "tools", toolUseIds: ["c"] });
   });
 });

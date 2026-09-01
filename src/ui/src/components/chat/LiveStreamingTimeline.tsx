@@ -1,14 +1,19 @@
-import { memo } from "react";
+import { memo, useMemo } from "react";
 import { useAppStore } from "../../stores/useAppStore";
 import { EMPTY_ACTIVITIES, EMPTY_TIMELINE } from "./chatConstants";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolActivitiesSection } from "./ToolActivitiesSection";
-import { timelineHasVisibleContent } from "./streamingTimeline";
+import {
+  collapseTimelineToolRuns,
+  timelineHasVisibleContent,
+} from "./streamingTimeline";
 import styles from "./ChatPanel.module.css";
 
 /**
- * Live assistant output in API arrival order. Isolated so thinking/text
- * deltas don't re-render the rest of ChatPanel.
+ * Live assistant output in API arrival order. Consecutive tool_use blocks
+ * are passed to ToolActivitiesSection as a run so grouped mode can merge
+ * them into "N tool calls" / one MCP server pill. Thinking and text still
+ * break that run.
  */
 export const LiveStreamingTimeline = memo(function LiveStreamingTimeline({
   sessionId,
@@ -29,11 +34,15 @@ export const LiveStreamingTimeline = memo(function LiveStreamingTimeline({
   const activities = useAppStore(
     (s) => s.toolActivities[sessionId] ?? EMPTY_ACTIVITIES,
   );
+  const collapsed = useMemo(
+    () => collapseTimelineToolRuns(items),
+    [items],
+  );
   if (!timelineHasVisibleContent(items)) return null;
 
   return (
     <div data-testid="live-streaming-timeline">
-      {items.map((item) => {
+      {collapsed.map((item) => {
         if (item.type === "thinking") {
           if (!item.content) return null;
           return (
@@ -59,8 +68,10 @@ export const LiveStreamingTimeline = memo(function LiveStreamingTimeline({
             </div>
           );
         }
-        const activity = activities.find((a) => a.toolUseId === item.toolUseId);
-        if (!activity) return null;
+        const run = item.toolUseIds
+          .map((id) => activities.find((activity) => activity.toolUseId === id))
+          .filter((activity): activity is NonNullable<typeof activity> => !!activity);
+        if (run.length === 0) return null;
         return (
           <ToolActivitiesSection
             key={item.id}
@@ -68,7 +79,7 @@ export const LiveStreamingTimeline = memo(function LiveStreamingTimeline({
             toolDisplayMode={toolDisplayMode}
             searchQuery={searchQuery}
             worktreePath={worktreePath}
-            activities={[activity]}
+            activities={run}
           />
         );
       })}
