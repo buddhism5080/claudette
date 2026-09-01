@@ -194,7 +194,10 @@ pub async fn rollback_to_checkpoint(
     if !prior_sid_for_cleanup.is_empty() {
         let _ = db.end_agent_session(&prior_sid_for_cleanup, false);
     }
-    db.save_chat_session_state(&chat_session_id, &snapshot.new_session_id, 0)
+    // Do not persist the minted UUID as a Claude session id — there is no
+    // JSONL yet. Saving it made the next send `--resume` a missing
+    // transcript and the CLI exited with no API call.
+    db.clear_chat_session_state(&chat_session_id)
         .map_err(|e| e.to_string())?;
 
     // Return the truncated message list for this session.

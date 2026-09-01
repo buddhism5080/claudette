@@ -389,10 +389,10 @@ pub async fn prepare_cross_harness_migration(
         let _ = agent::stop_agent(pid).await;
     }
 
-    // Persist the fresh session_id + turn_count so
-    // `send_chat_message`'s session-restore branch starts the new
-    // harness from a clean slate.
-    db.save_chat_session_state(&chat_session_id, &snapshot.new_session_id, 0)
+    // Clean slate for the CLI: do not persist the minted UUID as if a
+    // Claude JSONL already existed. `--resume` of that placeholder exits
+    // immediately with no API call (same bug as rollback).
+    db.clear_chat_session_state(&chat_session_id)
         .map_err(|e| e.to_string())?;
     // Retire the prior session id (if any) so the agent_sessions
     // table doesn't accumulate orphan rows pointing at the old

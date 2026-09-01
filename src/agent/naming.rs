@@ -138,6 +138,19 @@ fn claude_transcript_path(worktree_path: &str, session_id: &str) -> Result<PathB
         .join(format!("{session_id}.jsonl")))
 }
 
+/// Whether Claude Code has an on-disk transcript for this session id.
+///
+/// A non-empty `chat_sessions.session_id` is not enough: rollback and
+/// cross-harness migration mint a placeholder UUID *before* the CLI has
+/// written a JSONL. Treating that as `--resume` makes `claude` exit
+/// immediately with no API call.
+pub fn claude_session_transcript_exists(worktree_path: &str, session_id: &str) -> bool {
+    if session_id.trim().is_empty() {
+        return false;
+    }
+    claude_transcript_path(worktree_path, session_id).is_ok_and(|p| p.is_file())
+}
+
 /// Persist a Claude Code custom title for a session transcript.
 ///
 /// Claude Code's Remote Control bridge treats custom titles as explicit and
@@ -524,5 +537,30 @@ mod tests {
                 .map(String::as_str),
             Some("1")
         );
+    }
+
+    #[test]
+    fn transcript_exists_is_false_for_placeholder_sid_without_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("claude-home");
+        let wt = dir.path().join("worktree");
+        std::fs::create_dir_all(&wt).unwrap();
+        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
+        unsafe {
+            std::env::set_var("CLAUDE_CONFIG_DIR", &config);
+        }
+        let wt_str = wt.to_str().unwrap();
+        assert!(!claude_session_transcript_exists(wt_str, "minted-after-rollback"));
+        assert!(!claude_session_transcript_exists(wt_str, ""));
+        let path = claude_transcript_path(wt_str, "real-sid").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}\n").unwrap();
+        assert!(claude_session_transcript_exists(wt_str, "real-sid"));
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+        }
     }
 }

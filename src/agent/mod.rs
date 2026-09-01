@@ -31,7 +31,8 @@ pub use harness::{
     PersistentSessionStart,
 };
 pub use naming::{
-    generate_branch_name, generate_session_name, persist_claude_custom_title, sanitize_branch_name,
+    claude_session_transcript_exists, generate_branch_name, generate_session_name,
+    persist_claude_custom_title, sanitize_branch_name,
 };
 pub use process::{AgentEvent, TurnHandle, run_turn, stop_agent, stop_agent_graceful};
 pub use session::PersistentSession;

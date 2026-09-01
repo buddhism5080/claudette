@@ -515,6 +515,10 @@ fn should_resume_persistent_session(
     saved_turn_count: u32,
     has_persisted_claude_session: bool,
 ) -> bool {
+    // `has_persisted_claude_session` must mean "JSONL exists on disk", not
+    // merely "chat_sessions.session_id is non-empty". Rollback writes a
+    // placeholder UUID with turn_count=0; resuming it aborts the CLI
+    // before any API request.
     !saved_session_id.trim().is_empty() && (has_persisted_claude_session || saved_turn_count > 1)
 }
 
@@ -1082,10 +1086,7 @@ pub async fn send_chat_message(
         .get_chat_session(&chat_session_id)
         .map_err(|e| e.to_string())?
         .ok_or("Chat session not found")?;
-    let has_persisted_claude_session = chat_session
-        .session_id
-        .as_deref()
-        .is_some_and(|sid| !sid.trim().is_empty());
+    let persisted_cli_session_id = chat_session.session_id.clone();
     let workspace_id = chat_session.workspace_id.clone();
     // Now that we know which workspace this turn belongs to, stamp it
     // into the enclosing span so every nested event (DB write, MCP
@@ -1115,6 +1116,13 @@ pub async fn send_chat_message(
         .as_ref()
         .ok_or("Workspace has no worktree")?
         .clone();
+    // Resume only when the CLI actually has a transcript. Rollback and
+    // harness migration mint a placeholder UUID into chat_sessions before
+    // any JSONL exists; `--resume` of that id exits immediately with no
+    // upstream API call.
+    let has_persisted_claude_session = persisted_cli_session_id
+        .as_deref()
+        .is_some_and(|sid| claudette::agent::claude_session_transcript_exists(&worktree_path, sid));
 
     // Save user message to DB. Use the frontend-provided ID so optimistic
     // UI state (attachments keyed by message ID) stays consistent.
@@ -3693,6 +3701,22 @@ mod tests {
         assert!(!should_resume_persistent_session("fresh-uuid", 1, false));
         assert!(should_resume_persistent_session("fresh-uuid", 2, false));
         assert!(!should_resume_persistent_session("", 9, true));
+    }
+
+    #[test]
+    fn rollback_placeholder_sid_must_not_resume() {
+        // After rollback we mint a UUID (turn_count 0→1 on the next send)
+        // with no JSONL. Passing has_persisted=true because the DB column
+        // is non-empty is the bug: claude --resume <missing> exits with
+        // no API call. The send path must pass has_persisted=false here.
+        assert!(
+            !should_resume_persistent_session("minted-after-rollback", 1, false),
+            "post-rollback first send must start a fresh session"
+        );
+        assert!(
+            should_resume_persistent_session("minted-after-rollback", 1, true),
+            "the footgun: treating a placeholder sid as persisted WOULD resume"
+        );
     }
 
     #[test]
