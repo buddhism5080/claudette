@@ -451,12 +451,13 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
   adoptPersistedAssistantMessage: (sessionId, message) =>
     set((s) => {
       const msgs = s.chatMessages[sessionId] || [];
+      const liveId = s.liveAssistantMessageId[sessionId];
       const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
         msgs,
         message,
+        { liveId },
       );
       if (messages === msgs) return s;
-      const liveId = s.liveAssistantMessageId[sessionId];
       return {
         chatMessages: { ...s.chatMessages, [sessionId]: messages },
         lastMessages: {

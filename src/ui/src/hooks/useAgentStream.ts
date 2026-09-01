@@ -41,7 +41,7 @@ import { setPlanModeAndPersist } from "../components/chat/planModePersistence";
 import {
   applyCommandLineEvent,
   approvalDetailValue,
-  assistantContentsMatch,
+  applyCompleteAssistantThinking,
   extractAssistantMessageParts,
   firstApprovalDetailString,
   initialToolInputJson,
@@ -670,6 +670,10 @@ export function useAgentStream() {
             const inner = streamEvent.event;
             if ("type" in inner) {
               switch (inner.type) {
+                case "message_start": {
+                  thinkingBlocksRef.current[sessionId] = new Set();
+                  break;
+                }
                 case "message_delta": {
                   // Live meter update during streaming. Usage here is
                   // per-assistant-message cumulative — input_tokens reflects
@@ -900,35 +904,20 @@ export function useAgentStream() {
                 (turnMessageCountRef.current[sessionId] || 0) + 1;
             }
             if (thinking) {
-              const msgs =
-                useAppStore.getState().chatMessages[sessionId] || [];
               const liveId =
                 useAppStore.getState().liveAssistantMessageId[sessionId];
-              const idx = msgs.findIndex((m, i) => {
-                if (m.role !== "Assistant") return false;
-                if (liveId && m.id === liveId) return true;
-                if (text && assistantContentsMatch(m.content, text)) return true;
-                return (
-                  i === msgs.length - 1 &&
-                  m.role === "Assistant" &&
-                  !m.thinking?.trim()
-                );
-              });
-              if (idx >= 0 && !msgs[idx]!.thinking?.trim()) {
-                const updated = { ...msgs[idx]!, thinking };
+              const msgs =
+                useAppStore.getState().chatMessages[sessionId] || [];
+              const next = applyCompleteAssistantThinking(
+                msgs,
+                liveId,
+                text,
+                thinking,
+              );
+              if (next !== msgs) {
                 useAppStore.setState((s) => ({
-                  chatMessages: {
-                    ...s.chatMessages,
-                    [sessionId]: s.chatMessages[sessionId]!.map((m, i) =>
-                      i === idx ? updated : m,
-                    ),
-                  },
+                  chatMessages: { ...s.chatMessages, [sessionId]: next },
                 }));
-              } else if (idx < 0) {
-                appendLiveAssistantPart(sessionId, wsId, {
-                  type: "thinking",
-                  text: thinking,
-                });
               }
             }
             clearStreamingThinking(sessionId);

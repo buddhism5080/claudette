@@ -1357,6 +1357,28 @@ describe("MessagesWithTurns live stream order", () => {
     expect(container.textContent).toContain("I will edit the helper next.");
   });
 
+  it("keeps the Thinking… header after the live id is sealed while the turn is still running", async () => {
+    const assistant = message("assistant-1", "Assistant", "I inspected the schema.");
+    assistant.thinking = "";
+    useAppStore.setState({
+      showThinkingBlocks: { [SESSION_ID]: false },
+      liveAssistantMessageId: { [SESSION_ID]: null },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "Fix it"), assistant]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    expect(container.textContent).toContain("Thinking");
+  });
+
   it("shows a live Thinking… header with the Eye off and empty thinking so far", async () => {
     const assistant = message("assistant-1", "Assistant", "");
     assistant.thinking = "";
