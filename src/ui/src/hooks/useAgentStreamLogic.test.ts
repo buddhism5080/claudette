@@ -314,7 +314,12 @@ describe("adoptPersistedAssistantIntoLive", () => {
       ).messages;
     };
 
-    let msgs = [{ id: "u", role: "User", content: "go", thinking: null }];
+    let msgs: Array<{
+      id: string;
+      role: string;
+      content: string;
+      thinking: string | null;
+    }> = [{ id: "u", role: "User", content: "go", thinking: null }];
     msgs = round(msgs, 1);
     msgs = round(msgs, 2);
     msgs = round(msgs, 3);
