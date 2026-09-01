@@ -1,6 +1,7 @@
 use tauri::{AppHandle, Emitter};
 
 use claudette::agent;
+use claudette::agent_backend::AgentBackendRuntime;
 use claudette::db::Database;
 use claudette::env::WorkspaceEnv;
 use claudette::git;
@@ -18,6 +19,7 @@ pub(crate) async fn try_auto_rename(
     db_path: &std::path::Path,
     app: &AppHandle,
     ws_env: &WorkspaceEnv,
+    backend_runtime: &AgentBackendRuntime,
 ) {
     // Ask Haiku for a branch name slug.
     let slug = match agent::generate_branch_name(
@@ -25,6 +27,7 @@ pub(crate) async fn try_auto_rename(
         worktree_path,
         branch_rename_preferences,
         Some(ws_env),
+        Some(backend_runtime),
     )
     .await
     {
@@ -145,10 +148,26 @@ pub(crate) async fn try_generate_session_name(
     db_path: &std::path::Path,
     app: &AppHandle,
     ws_env: &WorkspaceEnv,
+    backend_runtime: &AgentBackendRuntime,
 ) {
-    let name = match agent::generate_session_name(prompt, worktree_path, Some(ws_env)).await {
+    let name = match agent::generate_session_name(
+        prompt,
+        worktree_path,
+        Some(ws_env),
+        Some(backend_runtime),
+    )
+    .await
+    {
         Ok(n) => n,
-        Err(_) => return,
+        Err(e) => {
+            tracing::warn!(
+                target: "claudette::chat",
+                session_id = %session_id,
+                error = %e,
+                "session auto-name: generate_session_name failed",
+            );
+            return;
+        }
     };
 
     let db = match Database::open(db_path) {

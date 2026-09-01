@@ -2428,6 +2428,7 @@ pub async fn send_chat_message(
         .as_ref()
         .and_then(|r| r.branch_rename_preferences.clone());
     let rename_ws_env = ws_env.clone();
+    let rename_backend_runtime = agent_settings.backend_runtime.clone();
     let remote_control_title_messages = db
         .list_chat_messages_for_session(&chat_session_id)
         .unwrap_or_default();
@@ -2493,6 +2494,7 @@ pub async fn send_chat_message(
             let app2 = app.clone();
             let prefs2 = rename_prefs.clone();
             let ws_env2 = rename_ws_env.clone();
+            let backend2 = rename_backend_runtime.clone();
             tokio::spawn(async move {
                 try_auto_rename(
                     &ws_id2,
@@ -2504,6 +2506,7 @@ pub async fn send_chat_message(
                     &db_path2,
                     &app2,
                     &ws_env2,
+                    &backend2,
                 )
                 .await;
             });
@@ -2523,9 +2526,12 @@ pub async fn send_chat_message(
             let db_path2 = db_path.clone();
             let app2 = app.clone();
             let ws_env2 = rename_ws_env.clone();
+            let backend2 = rename_backend_runtime.clone();
             tokio::spawn(async move {
-                try_generate_session_name(&sid2, &wt_path2, &prompt2, &db_path2, &app2, &ws_env2)
-                    .await;
+                try_generate_session_name(
+                    &sid2, &wt_path2, &prompt2, &db_path2, &app2, &ws_env2, &backend2,
+                )
+                .await;
             });
         }
 

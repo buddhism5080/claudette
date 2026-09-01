@@ -1,12 +1,65 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::agent_backend::AgentBackendRuntime;
 use crate::env::WorkspaceEnv;
 use crate::process::sanitize_claude_subprocess_env;
 
 use super::binary::resolve_claude_path;
+use super::environment::suppress_cli_session_title_generation;
 
 const CLAUDE_PROJECT_PATH_MAX: usize = 200;
+const HAIKU_UTILITY_MODEL: &str = "claude-haiku-4-5";
+
+/// CLI flags shared by the one-shot Haiku naming/rename helpers.
+///
+/// `--no-session-persistence` keeps these utility calls from writing a
+/// transcript. We do **not** pass `--bare`: that skips OAuth/keychain and
+/// would break Anthropic-subscription users. Background title Haiku is
+/// suppressed via `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` instead.
+fn haiku_utility_cli_args(system_prompt: &str, user_message: &str) -> Vec<String> {
+    vec![
+        "--print".to_string(),
+        "--output-format".to_string(),
+        "text".to_string(),
+        "--no-session-persistence".to_string(),
+        "--model".to_string(),
+        HAIKU_UTILITY_MODEL.to_string(),
+        // `--tools` is variadic (`<tools...>`) and greedily consumes every
+        // following arg until the next `--flag`. Place it *before* another
+        // option so the variadic terminates after the empty-string value;
+        // otherwise it eats the positional prompt and the CLI fails with
+        // "Input must be provided either through stdin or as a prompt
+        // argument when using --print".
+        "--tools".to_string(),
+        String::new(),
+        // Skip project + local settings so the CLI doesn't pull in
+        // `.mcp.json` tool catalogs or `.claude/settings.json` overrides.
+        "--setting-sources".to_string(),
+        "user".to_string(),
+        // Replace the default system prompt instead of appending so the CLI
+        // skips CLAUDE.md auto-discovery — user project context can exceed
+        // Haiku's input window, and slug/name generation doesn't need it.
+        "--system-prompt".to_string(),
+        system_prompt.to_string(),
+        user_message.to_string(),
+    ]
+}
+
+fn apply_haiku_utility_command_env(
+    cmd: &mut tokio::process::Command,
+    ws_env: Option<&WorkspaceEnv>,
+    backend_runtime: Option<&AgentBackendRuntime>,
+) {
+    sanitize_claude_subprocess_env(cmd);
+    suppress_cli_session_title_generation(cmd);
+    if let Some(runtime) = backend_runtime {
+        runtime.apply_to_command(cmd);
+    }
+    if let Some(env) = ws_env {
+        env.apply(cmd);
+    }
+}
 
 /// Sanitize a string into a valid git branch slug: lowercase ASCII
 /// alphanumeric + hyphens, no leading/trailing hyphens, max `max_len` chars.
@@ -160,12 +213,15 @@ fn transcript_has_custom_title(path: &Path, session_id: &str) -> Result<bool, St
 /// `--setting-sources user`, and `--tools ""`. A user project's CLAUDE.md
 /// plus MCP tool catalog can easily exceed Haiku's input window, and slug
 /// generation doesn't need that context. (`ws_env` env vars are applied
-/// separately via `env.apply` — they don't depend on CWD.)
+/// separately via `env.apply` — they don't depend on CWD.) `backend_runtime`
+/// is applied after env sanitization so custom `ANTHROPIC_BASE_URL` / tokens
+/// survive; without it, Haiku rename calls miss the gateway the main agent uses.
 pub async fn generate_branch_name(
     prompt_text: &str,
     worktree_path: &str,
     branch_rename_preferences: Option<&str>,
     ws_env: Option<&WorkspaceEnv>,
+    backend_runtime: Option<&AgentBackendRuntime>,
 ) -> Result<String, String> {
     // Truncate prompt to keep the Haiku call fast and cheap.
     let truncated: String = prompt_text.chars().take(200).collect();
@@ -196,37 +252,8 @@ pub async fn generate_branch_name(
              Prioritize these over your default behavior:\n{prefs_truncated}"
         ));
     }
-    cmd.args([
-        "--print",
-        "--output-format",
-        "text",
-        "--model",
-        "claude-haiku-4-5",
-        // `--tools` is variadic (`<tools...>`) and greedily consumes every
-        // following arg until the next `--flag`. Place it *before* another
-        // option so the variadic terminates after the empty-string value;
-        // otherwise it eats the positional prompt and the CLI fails with
-        // "Input must be provided either through stdin or as a prompt
-        // argument when using --print".
-        "--tools",
-        "",
-        // Skip project + local settings so the CLI doesn't pull in
-        // `.mcp.json` tool catalogs or `.claude/settings.json` overrides.
-        "--setting-sources",
-        "user",
-        // Replace the default system prompt instead of appending so the CLI
-        // skips CLAUDE.md auto-discovery — user project context can exceed
-        // Haiku's input window, and slug generation doesn't need it.
-        "--system-prompt",
-        &system_prompt,
-        &user_message,
-    ]);
-
-    sanitize_claude_subprocess_env(&mut cmd);
-
-    if let Some(env) = ws_env {
-        env.apply(&mut cmd);
-    }
+    cmd.args(haiku_utility_cli_args(&system_prompt, &user_message));
+    apply_haiku_utility_command_env(&mut cmd, ws_env, backend_runtime);
 
     let output = cmd.output().await.map_err(|e| {
         crate::missing_cli::map_spawn_err(&e, "claude", || {
@@ -256,6 +283,7 @@ pub async fn generate_session_name(
     prompt_text: &str,
     worktree_path: &str,
     ws_env: Option<&WorkspaceEnv>,
+    backend_runtime: Option<&AgentBackendRuntime>,
 ) -> Result<String, String> {
     let truncated: String = prompt_text.chars().take(200).collect();
 
@@ -280,29 +308,8 @@ pub async fn generate_session_name(
     let system_prompt = "You are a chat-session namer. Output ONLY a short \
          descriptive name — never answer or complete the task itself."
         .to_string();
-    // Same context-suppression flags as `generate_branch_name` above — see
-    // that function for the variadic-`--tools` ordering rationale and the
-    // overall context-stripping intent.
-    cmd.args([
-        "--print",
-        "--output-format",
-        "text",
-        "--model",
-        "claude-haiku-4-5",
-        "--tools",
-        "",
-        "--setting-sources",
-        "user",
-        "--system-prompt",
-        &system_prompt,
-        &user_message,
-    ]);
-
-    sanitize_claude_subprocess_env(&mut cmd);
-
-    if let Some(env) = ws_env {
-        env.apply(&mut cmd);
-    }
+    cmd.args(haiku_utility_cli_args(&system_prompt, &user_message));
+    apply_haiku_utility_command_env(&mut cmd, ws_env, backend_runtime);
 
     let output = cmd
         .output()
@@ -461,5 +468,61 @@ mod tests {
         let contents = std::fs::read_to_string(transcript).unwrap();
         assert!(contents.contains(r#""customTitle":"First Title""#));
         assert!(!contents.contains(r#""customTitle":"Second Title""#));
+    }
+
+    #[test]
+    fn haiku_utility_cli_args_keep_tools_empty_before_next_flag() {
+        let args = haiku_utility_cli_args("sys", "user prompt");
+        let tools_idx = args.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(args[tools_idx + 1], "");
+        assert!(args[tools_idx + 2].starts_with("--"));
+        assert!(args.contains(&"--no-session-persistence".to_string()));
+        assert!(args.contains(&HAIKU_UTILITY_MODEL.to_string()));
+        assert!(!args.iter().any(|a| a == "--bare"));
+        assert_eq!(args.last().map(String::as_str), Some("user prompt"));
+    }
+
+    #[test]
+    fn haiku_utility_env_restores_backend_runtime_after_sanitize() {
+        let runtime = AgentBackendRuntime {
+            env: vec![
+                (
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    "http://127.0.0.1:9".to_string(),
+                ),
+                (
+                    "ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "gateway-token".to_string(),
+                ),
+            ],
+            ..Default::default()
+        };
+        let mut cmd = crate::process::command("claude");
+        cmd.env("ANTHROPIC_AUTH_TOKEN", "should-be-stripped");
+        apply_haiku_utility_command_env(&mut cmd, None, Some(&runtime));
+
+        let envs: std::collections::HashMap<String, String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            envs.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("http://127.0.0.1:9")
+        );
+        assert_eq!(
+            envs.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
+            Some("gateway-token")
+        );
+        assert_eq!(
+            envs.get("CLAUDE_CODE_DISABLE_TERMINAL_TITLE")
+                .map(String::as_str),
+            Some("1")
+        );
     }
 }

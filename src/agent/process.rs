@@ -11,7 +11,9 @@ use crate::process::sanitize_claude_subprocess_env;
 use super::AgentSettings;
 use super::args::{build_claude_args, build_stdin_message};
 use super::binary::resolve_claude_path;
-use super::environment::{apply_teammate_command_override, build_agent_command};
+use super::environment::{
+    apply_teammate_command_override, build_agent_command, suppress_cli_session_title_generation,
+};
 use super::types::{FileAttachment, StreamEvent, parse_stream_line};
 
 /// Events emitted by an agent turn (stream events + process lifecycle).
@@ -103,6 +105,7 @@ pub async fn run_turn(
         });
 
     sanitize_claude_subprocess_env(&mut cmd);
+    suppress_cli_session_title_generation(&mut cmd);
 
     // build_agent_command applies the merged env-provider map for direct
     // spawns, or wraps Nix workspaces in `nix develop --command` so the

@@ -6,6 +6,14 @@ use tokio::process::Command;
 use crate::env_provider::ResolvedEnv;
 
 const CLAUDE_CODE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
+const CLAUDE_CODE_DISABLE_TERMINAL_TITLE: &str = "CLAUDE_CODE_DISABLE_TERMINAL_TITLE";
+
+/// Claude Code otherwise fires a background Haiku request to title unnamed
+/// sessions. Headless/SDK hosts that already name sessions (and slow
+/// third-party backends) see that side request aborted in ~1–2s as HTTP 499.
+pub(crate) fn suppress_cli_session_title_generation(cmd: &mut Command) {
+    cmd.env(CLAUDE_CODE_DISABLE_TERMINAL_TITLE, "1");
+}
 
 /// Point Claude Code agent-team teammate launches back at the current
 /// Claudette executable. Claude Code invokes this command with its teammate
@@ -132,6 +140,26 @@ mod tests {
             super::CLAUDE_CODE_TEAMMATE_COMMAND,
             "CLAUDE_CODE_TEAMMATE_COMMAND"
         );
+    }
+
+    #[test]
+    fn suppress_cli_session_title_generation_sets_documented_env() {
+        assert_eq!(
+            super::CLAUDE_CODE_DISABLE_TERMINAL_TITLE,
+            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE"
+        );
+        let mut cmd = crate::process::command("claude");
+        super::suppress_cli_session_title_generation(&mut cmd);
+        let actual = cmd
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| {
+                (key == std::ffi::OsStr::new(super::CLAUDE_CODE_DISABLE_TERMINAL_TITLE))
+                    .then_some(value)
+                    .flatten()
+            })
+            .and_then(std::ffi::OsStr::to_str);
+        assert_eq!(actual, Some("1"));
     }
 
     #[test]
