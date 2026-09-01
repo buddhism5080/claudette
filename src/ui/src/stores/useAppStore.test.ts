@@ -317,12 +317,21 @@ describe("finishTypewriterDrain (per-workspace)", () => {
     useAppStore.setState({ pendingTypewriter: {}, streamingThinking: {} });
   });
 
-  it("clears pendingTypewriter and streamingThinking in one update", () => {
+  it("clears pendingTypewriter without wiping live thinking/timeline", () => {
     useAppStore.getState().setPendingTypewriter(WS_ID, "msg-1", "hello world");
     useAppStore.getState().appendStreamingThinking(WS_ID, "hm...");
+    useAppStore.getState().startStreamingTimelineBlock(WS_ID, {
+      type: "thinking",
+      id: "th-0",
+    });
+    useAppStore.getState().appendStreamingTimelineDelta(WS_ID, "thinking", "hm...");
     useAppStore.getState().finishTypewriterDrain(WS_ID);
     expect(useAppStore.getState().pendingTypewriter[WS_ID]).toBeNull();
-    expect(useAppStore.getState().streamingThinking[WS_ID]).toBe("");
+    expect(useAppStore.getState().streamingThinking[WS_ID]).toBe("hm...");
+    expect(useAppStore.getState().streamingTimeline[WS_ID]?.[0]).toMatchObject({
+      type: "thinking",
+      content: "hm...",
+    });
   });
 
   it("is isolated per workspace — other workspaces are unaffected", () => {
@@ -332,7 +341,7 @@ describe("finishTypewriterDrain (per-workspace)", () => {
     useAppStore.getState().appendStreamingThinking("ws-b", "think-b");
     useAppStore.getState().finishTypewriterDrain("ws-a");
     expect(useAppStore.getState().pendingTypewriter["ws-a"]).toBeNull();
-    expect(useAppStore.getState().streamingThinking["ws-a"]).toBe("");
+    expect(useAppStore.getState().streamingThinking["ws-a"]).toBe("think-a");
     expect(useAppStore.getState().pendingTypewriter["ws-b"]).toEqual({
       messageId: "msg-b",
       text: "beta",
@@ -343,7 +352,6 @@ describe("finishTypewriterDrain (per-workspace)", () => {
   it("is a no-op when called with no prior state", () => {
     useAppStore.getState().finishTypewriterDrain(WS_ID);
     expect(useAppStore.getState().pendingTypewriter[WS_ID]).toBeNull();
-    expect(useAppStore.getState().streamingThinking[WS_ID]).toBe("");
   });
 });
 

@@ -913,11 +913,12 @@ export function useAgentStream() {
                 cache_read_tokens: null,
                 cache_creation_tokens: null,
               });
-              // streamingThinking is NOT cleared here — StreamingThinkingBlock
-              // needs to keep rendering through the typewriter drain so the
-              // block doesn't vanish between streamingContent clearing and the
-              // completed message unhiding. It's cleared atomically with
-              // pendingTypewriter at drain-complete via finishTypewriterDrain.
+              // Next thinking round starts empty; the timeline still holds
+              // the frozen blocks for live rendering until the turn ends.
+              clearStreamingThinking(sessionId);
+              // streamingTimeline is NOT cleared here — wiping it on the
+              // typewriter drain hid thinking as soon as the first text
+              // arrived while tools were still running.
             }
             setStreamingContent(sessionId, "");
             break;
@@ -954,6 +955,8 @@ export function useAgentStream() {
             syncWorkspaceTurnStatus(wsId);
             clearPromptStartTimeIfWorkspaceIdle(wsId);
             useAppStore.getState().markWorkspaceAsUnread(wsId);
+            clearStreamingTimeline(sessionId);
+            clearStreamingThinking(sessionId);
             break;
           }
           case "user": {

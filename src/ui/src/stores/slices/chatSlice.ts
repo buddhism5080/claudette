@@ -194,10 +194,10 @@ export interface ChatSlice {
   setStreamingContent: (sessionId: string, content: string) => void;
   appendStreamingContent: (sessionId: string, text: string) => void;
   setPendingTypewriter: (sessionId: string, messageId: string, text: string) => void;
-  /** Atomic drain-end handoff: clears both `pendingTypewriter` and
-   *  `streamingThinking` in a single store update so the streaming thinking
-   *  block and the draining assistant text hand off to the completed message
-   *  in the same render, without a gap or a 1-frame duplicate. */
+  /** Clears `pendingTypewriter` so the persisted assistant message can
+   *  unhide. Does not wipe `streamingThinking` / `streamingTimeline` —
+   *  those live until the turn's `result` so thinking stays visible while
+   *  later tool calls are still running. */
   finishTypewriterDrain: (sessionId: string) => void;
   appendStreamingThinking: (sessionId: string, text: string) => void;
   clearStreamingThinking: (sessionId: string) => void;
@@ -472,8 +472,6 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
   finishTypewriterDrain: (sessionId) =>
     set((s) => ({
       pendingTypewriter: { ...s.pendingTypewriter, [sessionId]: null },
-      streamingThinking: { ...s.streamingThinking, [sessionId]: "" },
-      streamingTimeline: { ...s.streamingTimeline, [sessionId]: [] },
     })),
   appendStreamingThinking: (sessionId, text) =>
     set((s) => ({

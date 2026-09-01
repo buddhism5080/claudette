@@ -955,17 +955,19 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
 
         // Default rendering for User, Assistant, and non-sentinel System messages.
         // Assistant thinking is hoisted above tools at this position so API
-        // order (thinking → tool_use → text) is preserved instead of rendering
-        // ordinal-0 tools before the whole assistant bubble.
+        // order is preserved. Always mount when the message carries thinking —
+        // the Eye chip only controls default-expanded vs collapsed, it must
+        // not delete the block. While the live timeline is showing this turn,
+        // skip the persisted bubble (and its thinking) to avoid duplicates.
         const pending = msg.id === pendingMessageId;
+        const liveTimelineOwnsTurn =
+          isRunning && timelineVisible && msg.role === "Assistant";
         const assistantThinking =
-          !pending &&
-          msg.role === "Assistant" &&
-          msg.thinking &&
-          showThinkingBlocks ? (
+          !liveTimelineOwnsTurn && msg.role === "Assistant" && msg.thinking ? (
             <ThinkingBlock
               content={msg.thinking}
-              isStreaming={false}
+              isStreaming={pending}
+              defaultExpanded={showThinkingBlocks}
               inline={toolDisplayMode === "inline"}
               searchQuery={searchQuery}
             />
@@ -975,8 +977,8 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
             {assistantThinking}
             {renderTurns(globalOffset + idx)}
             {renderLiveToolActivity(globalOffset + idx)}
-            {pending ? (
-              timelineVisible ? null : streamingMessageNode
+            {liveTimelineOwnsTurn || pending ? (
+              liveTimelineOwnsTurn ? null : streamingMessageNode
             ) : (
               <div
                 className={`${styles.message} ${styles[
@@ -984,7 +986,7 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
                     forceSystemBlock: isAuthFailureMessage,
                   })
                 ]}${
-                  msg.role === "Assistant" && msg.thinking && showThinkingBlocks
+                  msg.role === "Assistant" && msg.thinking
                     ? ` ${styles.messageLeadingThinking}`
                     : ""
                 }`}

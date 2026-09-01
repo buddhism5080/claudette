@@ -10,9 +10,9 @@ interface ThinkingBlockProps {
   isStreaming: boolean;
   enableTypewriter?: boolean;
   inline?: boolean;
-  /** Active chat-search query. When non-empty and the query matches inside
-   *  this block's content, the block force-expands so matches aren't
-   *  hidden behind the collapsed header. */
+  /** When true, the block starts expanded (persisted thinking with the
+   *  toolbar Eye on). Live streaming always expands regardless. */
+  defaultExpanded?: boolean;
   searchQuery?: string;
 }
 
@@ -21,9 +21,10 @@ export function ThinkingBlock({
   isStreaming,
   enableTypewriter,
   inline = false,
+  defaultExpanded = false,
   searchQuery,
 }: ThinkingBlockProps) {
-  const [expanded, setExpanded] = useState(isStreaming);
+  const [expanded, setExpanded] = useState(isStreaming || defaultExpanded);
   const label = isStreaming ? "Thinking…" : "Thinking";
   const queryMatches =
     !!searchQuery && content.toLowerCase().includes(searchQuery.toLowerCase());
