@@ -217,14 +217,17 @@ describe("adoptPersistedAssistantIntoLive", () => {
     expect(messages[0]?.id).toBe("db-th");
   });
 
-  it("matches a live prefix of the persisted content so streaming rows adopt", () => {
+  it("adopts a text persist onto this turn's last text block, not by prefix", () => {
     const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
-      [{ id: "live-1", role: "Assistant", content: "规格要先改", thinking: null }],
+      [
+        { id: "u", role: "User", content: "go", thinking: null },
+        { id: "live-1", role: "Assistant", content: "规格要先改", thinking: null },
+      ],
       { id: "db-1", role: "Assistant", content: "规格要先改：整棵跳过。", thinking: null },
     );
     expect(adoptedFromId).toBe("live-1");
-    expect(messages).toHaveLength(1);
-    expect(messages[0]?.content).toBe("规格要先改：整棵跳过。");
+    expect(messages).toHaveLength(2);
+    expect(messages[1]?.content).toBe("规格要先改：整棵跳过。");
   });
 
   it("does not append when appendIfMissing is false", () => {
@@ -234,18 +237,19 @@ describe("adoptPersistedAssistantIntoLive", () => {
     const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
       live,
       { id: "db-extra", role: "Assistant", content: "dumped at bottom", thinking: null },
-      { appendIfMissing: false },
+      { mode: "reload", appendIfMissing: false },
     );
     expect(adoptedFromId).toBeNull();
     expect(messages).toEqual(live);
   });
 
-  it("attaches a thinking-only persist onto the text row instead of dumping it after the tool", () => {
+  it("adopts thinking-only onto the thinking row, not the text row", () => {
     const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
       [
         { id: "u", role: "User", content: "go", thinking: null },
+        { id: "th", role: "Assistant", content: "", thinking: "先扫规格再读源码。" },
         {
-          id: "live-1",
+          id: "tx",
           role: "Assistant",
           content: "README 提到产品规格在 research/。",
           thinking: "",
@@ -257,44 +261,52 @@ describe("adoptPersistedAssistantIntoLive", () => {
         content: "",
         thinking: "先扫规格再读源码。",
       },
-      { liveId: "live-1" },
+      { liveId: "tx" },
     );
-    expect(adoptedFromId).toBe("live-1");
-    expect(messages).toHaveLength(2);
+    expect(adoptedFromId).toBe("th");
+    expect(messages).toHaveLength(3);
     expect(messages[1]?.id).toBe("db-th");
-    expect(messages[1]?.content).toBe("README 提到产品规格在 research/。");
-    expect(messages[1]?.thinking).toBe("先扫规格再读源码。");
+    expect(messages[2]?.id).toBe("tx");
+    expect(messages[2]?.content).toBe("README 提到产品规格在 research/。");
+    expect(messages[2]?.thinking).toBe("");
   });
 
-  it("keeps earlier-round thinking when later thinking-only persists adopt", () => {
+  it("keeps one thinking block and one text block per tool round", () => {
     const round = (
       live: Array<{ id: string; role: string; content: string; thinking: string | null }>,
       n: number,
     ) => {
-      const liveId = `live-${n}`;
-      const withText = [
+      const withThinking = [
         ...live,
         {
-          id: liveId,
+          id: `th-${n}`,
           role: "Assistant",
-          content: `round ${n} text`,
-          thinking: "",
+          content: "",
+          thinking: `round ${n} thought`,
         },
       ];
       const afterThink = adoptPersistedAssistantIntoLive(
-        withText,
+        withThinking,
         {
           id: `db-th-${n}`,
           role: "Assistant",
           content: "",
           thinking: `round ${n} thought`,
         },
-        { liveId },
       ).messages;
-      return adoptPersistedAssistantIntoLive(
-        afterThink,
+      const withText = [
+        ...afterThink,
         {
-          id: `db-text-${n}`,
+          id: `tx-${n}`,
+          role: "Assistant",
+          content: `round ${n} text`,
+          thinking: null,
+        },
+      ];
+      return adoptPersistedAssistantIntoLive(
+        withText,
+        {
+          id: `db-tx-${n}`,
           role: "Assistant",
           content: `round ${n} text`,
           thinking: null,
@@ -308,23 +320,22 @@ describe("adoptPersistedAssistantIntoLive", () => {
     msgs = round(msgs, 3);
 
     const asst = msgs.filter((m) => m.role === "Assistant");
-    expect(asst).toHaveLength(3);
-    expect(asst.map((m) => m.thinking)).toEqual([
-      "round 1 thought",
-      "round 2 thought",
-      "round 3 thought",
-    ]);
-    expect(asst.map((m) => m.content)).toEqual([
-      "round 1 text",
-      "round 2 text",
-      "round 3 text",
+    expect(asst.map((m) => ({ content: m.content, thinking: m.thinking }))).toEqual([
+      { content: "", thinking: "round 1 thought" },
+      { content: "round 1 text", thinking: null },
+      { content: "", thinking: "round 2 thought" },
+      { content: "round 2 text", thinking: null },
+      { content: "", thinking: "round 3 thought" },
+      { content: "round 3 text", thinking: null },
     ]);
   });
 
-  it("adopts a later streaming prefix onto the last matching row, not an earlier one", () => {
+  it("does not prefix-match a later text persist onto an earlier assistant", () => {
     const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
       [
+        { id: "u", role: "User", content: "go", thinking: null },
         { id: "a1", role: "Assistant", content: "规格里已经看到用户账本。", thinking: "t1" },
+        { id: "th", role: "Assistant", content: "", thinking: "t2" },
         { id: "a2", role: "Assistant", content: "规格", thinking: "" },
       ],
       {
@@ -335,26 +346,28 @@ describe("adoptPersistedAssistantIntoLive", () => {
       },
     );
     expect(adoptedFromId).toBe("a2");
-    expect(messages[0]?.thinking).toBe("t1");
-    expect(messages[0]?.content).toBe("规格里已经看到用户账本。");
-    expect(messages[1]?.id).toBe("db-2");
-    expect(messages[1]?.content).toBe("规格已经对上了。接下来读登录。");
+    expect(messages[1]?.thinking).toBe("t1");
+    expect(messages[1]?.content).toBe("规格里已经看到用户账本。");
+    expect(messages[2]?.thinking).toBe("t2");
+    expect(messages[3]?.id).toBe("db-2");
+    expect(messages[3]?.content).toBe("规格已经对上了。接下来读登录。");
   });
 });
 
 describe("applyCompleteAssistantThinking", () => {
-  it("fills thinking on the last matching text row when deltas missed", () => {
+  it("fills thinking on this turn's thinking row, not a later text row", () => {
     const next = applyCompleteAssistantThinking(
       [
-        { id: "a1", role: "Assistant", content: "first", thinking: "t1" },
-        { id: "a2", role: "Assistant", content: "second", thinking: "" },
+        { id: "u", role: "User", content: "go", thinking: null },
+        { id: "th", role: "Assistant", content: "", thinking: "" },
+        { id: "tx", role: "Assistant", content: "second", thinking: "" },
       ],
-      null,
+      "tx",
       "second",
       "plan the second edit",
     );
-    expect(next[0]?.thinking).toBe("t1");
     expect(next[1]?.thinking).toBe("plan the second edit");
+    expect(next[2]?.thinking).toBe("");
   });
 });
 

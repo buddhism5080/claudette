@@ -769,9 +769,9 @@ export function useAgentStream() {
                       type: "thinking",
                       id: `thinking-${inner.index}`,
                     });
-                    // Open a live chatMessages row immediately so ThinkingBlock
-                    // can show "Thinking…" before the first delta. The parallel
-                    // streamingThinking / timeline lanes are not mounted.
+                    // One chatMessages row per block. Seal any prior
+                    // thinking/text so this thinking cannot merge onto it.
+                    sealLiveAssistantMessage(sessionId);
                     appendLiveAssistantPart(sessionId, wsId, {
                       type: "thinking",
                       text: "",
@@ -785,6 +785,11 @@ export function useAgentStream() {
                     startStreamingTimelineBlock(sessionId, {
                       type: "text",
                       id: `text-${inner.index}`,
+                    });
+                    sealLiveAssistantMessage(sessionId);
+                    appendLiveAssistantPart(sessionId, wsId, {
+                      type: "text",
+                      text: "",
                     });
                   }
                   if (

@@ -2790,11 +2790,9 @@ pub async fn send_chat_message(
                 if claudette::mcp_supervisor::extract_mcp_server_name(name).is_some() {
                     mcp_tool_names.insert(id.clone(), name.clone());
                 }
-                // Thinking that arrived before this tool must be its own
-                // chat_messages row. Otherwise checkpoint.message_id (the
-                // later text row) would be the only assistant id, and the
-                // live thinking-only bubble would vanish on reload — and
-                // fork/rollback would have nothing to copy for it.
+                // One transcript row per thinking block, in arrival order,
+                // so reload/fork/checkpoint keep the block that sat before
+                // this tool. Not a glue row to merge onto later text.
                 if let Some(thinking) = pending_thinking.take()
                     && let Ok(db) = Database::open(&db_path)
                     && let Some(msg) = persist_assistant_chat_message(

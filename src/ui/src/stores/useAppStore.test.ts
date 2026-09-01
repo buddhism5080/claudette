@@ -367,6 +367,28 @@ describe("appendLiveAssistantPart", () => {
     expect(msgs[1]?.content).toBe("after tools");
   });
 
+  it("keeps thinking and text as separate rows when text starts after thinking", () => {
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "thinking",
+      text: "plan",
+    });
+    useAppStore.getState().sealLiveAssistantMessage(WS_ID);
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "text",
+      text: "",
+    });
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "text",
+      text: "Done.",
+    });
+    const msgs = useAppStore.getState().chatMessages[WS_ID] ?? [];
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0]?.thinking).toBe("plan");
+    expect(msgs[0]?.content).toBe("");
+    expect(msgs[1]?.thinking).toBeNull();
+    expect(msgs[1]?.content).toBe("Done.");
+  });
+
   it("adopts the persisted DB id onto the live assistant row", () => {
     useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
       type: "text",

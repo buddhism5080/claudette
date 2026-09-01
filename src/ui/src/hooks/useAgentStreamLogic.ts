@@ -182,11 +182,12 @@ export function reconcileReloadedTranscript<
   return merged;
 }
 
-export function assistantContentsMatch(live: string, persisted: string): boolean {
-  const a = live.trim();
-  const b = persisted.trim();
-  if (!a || !b) return false;
-  return a === b || b.startsWith(a) || a.startsWith(b);
+/** Last User index, or -1. A turn's assistant blocks sit after this. */
+export function lastUserIndex<T extends { role: string }>(messages: readonly T[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "User") return i;
+  }
+  return -1;
 }
 
 function mergeAssistantFields<
@@ -200,14 +201,32 @@ function mergeAssistantFields<
   };
 }
 
+/**
+ * Bind a DB assistant row onto the live transcript.
+ *
+ * Live (`mode: "turn"`, default): the persist is the block that just
+ * finished. Attach it to the current turn's matching block — thinking-only
+ * → last empty-content assistant; text → last content assistant — never
+ * search earlier turns or match on string prefixes.
+ *
+ * Reload (`mode: "reload"`): id or exact content only. No append, no prefix.
+ */
 export function adoptPersistedAssistantIntoLive<
   T extends { id: string; role: string; content: string; thinking?: string | null },
 >(
   live: T[],
   persisted: T,
-  opts: { appendIfMissing?: boolean; liveId?: string | null } = {},
+  opts: {
+    appendIfMissing?: boolean;
+    liveId?: string | null;
+    mode?: "turn" | "reload";
+  } = {},
 ): { messages: T[]; adoptedFromId: string | null } {
-  const appendIfMissing = opts.appendIfMissing !== false;
+  const mode = opts.mode ?? "turn";
+  const appendIfMissing =
+    opts.appendIfMissing !== undefined
+      ? opts.appendIfMissing
+      : mode !== "reload";
   if (persisted.role !== "Assistant") {
     if (live.some((msg) => msg.id === persisted.id)) {
       return { messages: live, adoptedFromId: persisted.id };
@@ -229,56 +248,63 @@ export function adoptPersistedAssistantIntoLive<
   const sameId = live.findIndex((msg) => msg.id === persisted.id);
   if (sameId >= 0) return mergeAt(sameId);
 
-  const persistedText = persisted.content.trim();
-  const persistedThinking = (persisted.thinking || "").trim();
-  // Thinking-only DB rows are flushed at tool_use. The live row already has
-  // the assistant text; appending would dump thinking *after* the tool card.
-  if (!persistedText && persistedThinking) {
-    const tryIdx = (idx: number) => {
-      if (idx < 0 || live[idx]?.role !== "Assistant") return false;
-      const existing = (live[idx]!.thinking || "").trim();
-      return (
-        !existing ||
-        existing === persistedThinking ||
-        persistedThinking.startsWith(existing) ||
-        existing.startsWith(persistedThinking)
-      );
-    };
-    let idx = opts.liveId
-      ? live.findIndex((msg) => msg.id === opts.liveId)
-      : -1;
-    if (!tryIdx(idx)) {
-      idx = -1;
-      for (let i = live.length - 1; i >= 0; i--) {
-        if (live[i]?.role === "Assistant" && tryIdx(i)) {
-          idx = i;
-          break;
+  if (mode === "reload") {
+    const exact = persisted.content.trim();
+    if (exact) {
+      for (let i = 0; i < live.length; i++) {
+        const msg = live[i]!;
+        if (msg.role === "Assistant" && msg.content.trim() === exact) {
+          return mergeAt(i);
+        }
+      }
+    } else {
+      const persistedThinking = (persisted.thinking || "").trim();
+      for (let i = 0; i < live.length; i++) {
+        const msg = live[i]!;
+        if (
+          msg.role === "Assistant" &&
+          !msg.content.trim() &&
+          (msg.thinking || "").trim() === persistedThinking
+        ) {
+          return mergeAt(i);
         }
       }
     }
-    if (idx >= 0 && tryIdx(idx)) return mergeAt(idx);
+    return {
+      messages: appendIfMissing ? [...live, persisted] : live,
+      adoptedFromId: null,
+    };
   }
 
-  // Last match, not first: a later streaming prefix must not adopt onto an
-  // earlier assistant that happens to share a short leading substring.
-  for (let i = live.length - 1; i >= 0; i--) {
-    const msg = live[i]!;
-    if (msg.role !== "Assistant") continue;
-    if (assistantContentsMatch(msg.content, persisted.content)) {
-      return mergeAt(i);
+  const turnStart = lastUserIndex(live) + 1;
+  const persistedText = persisted.content.trim();
+  const findLastInTurn = (pred: (msg: T) => boolean) => {
+    for (let i = live.length - 1; i >= turnStart; i--) {
+      const msg = live[i]!;
+      if (msg.role === "Assistant" && pred(msg)) return i;
     }
-  }
+    return -1;
+  };
 
-  for (let i = live.length - 1; i >= 0; i--) {
-    const msg = live[i]!;
-    if (msg.role !== "Assistant") continue;
-    if (!msg.content.trim() && !persisted.content.trim()) {
-      const liveThinking = (msg.thinking || "").trim();
-      if (liveThinking.length > 0 && liveThinking === persistedThinking) {
-        return mergeAt(i);
-      }
+  let idx = -1;
+  if (opts.liveId) {
+    const liveIdx = live.findIndex((msg) => msg.id === opts.liveId);
+    if (
+      liveIdx >= turnStart &&
+      live[liveIdx]?.role === "Assistant" &&
+      (!persistedText
+        ? !live[liveIdx]!.content.trim()
+        : !!live[liveIdx]!.content.trim() || live[liveIdx]!.id === opts.liveId)
+    ) {
+      idx = liveIdx;
     }
   }
+  if (idx < 0) {
+    idx = persistedText
+      ? findLastInTurn((msg) => !!msg.content.trim())
+      : findLastInTurn((msg) => !msg.content.trim());
+  }
+  if (idx >= 0) return mergeAt(idx);
 
   return {
     messages: appendIfMissing ? [...live, persisted] : live,
@@ -286,49 +312,41 @@ export function adoptPersistedAssistantIntoLive<
   };
 }
 
-/** Put complete-assistant thinking onto the live row even when deltas missed. */
+/** Fill thinking on this turn's thinking row (empty content), not an older text row. */
 export function applyCompleteAssistantThinking<
   T extends { id: string; role: string; content: string; thinking?: string | null },
 >(
   msgs: T[],
   liveId: string | null | undefined,
-  text: string,
+  _text: string,
   thinking: string,
 ): T[] {
   const incoming = thinking.trim();
   if (!incoming) return msgs;
-  let idx = liveId ? msgs.findIndex((msg) => msg.id === liveId) : -1;
-  if (idx < 0 && text.trim()) {
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (
-        msgs[i]?.role === "Assistant" &&
-        assistantContentsMatch(msgs[i]!.content, text)
-      ) {
-        idx = i;
-        break;
-      }
+  const turnStart = lastUserIndex(msgs) + 1;
+  let idx = -1;
+  if (liveId) {
+    const liveIdx = msgs.findIndex((msg) => msg.id === liveId);
+    if (
+      liveIdx >= turnStart &&
+      msgs[liveIdx]?.role === "Assistant" &&
+      !msgs[liveIdx]!.content.trim()
+    ) {
+      idx = liveIdx;
     }
   }
   if (idx < 0) {
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i]?.role === "Assistant") {
+    for (let i = msgs.length - 1; i >= turnStart; i--) {
+      if (msgs[i]?.role === "Assistant" && !msgs[i]!.content.trim()) {
         idx = i;
         break;
       }
     }
   }
   if (idx < 0) return msgs;
-  const row = msgs[idx]!;
-  const existing = row.thinking || "";
-  if (existing.trim() === incoming || existing.includes(incoming)) return msgs;
-  const merged =
-    !existing.trim() || incoming.startsWith(existing) || existing.startsWith(incoming)
-      ? incoming.length >= existing.length
-        ? thinking
-        : existing
-      : existing;
-  if (merged === existing) return msgs;
-  return msgs.map((msg, i) => (i === idx ? { ...msg, thinking: merged } : msg));
+  const existing = msgs[idx]!.thinking || "";
+  if (existing.trim()) return msgs;
+  return msgs.map((msg, i) => (i === idx ? { ...msg, thinking } : msg));
 }
 
 /** Checkpoint reload must keep live arrival order. Only swap DB ids / thinking. */
@@ -339,6 +357,7 @@ export function reattachPersistedAssistantsKeepingLiveOrder<
   for (const dbMsg of dbMessages) {
     if (dbMsg.role !== "Assistant") continue;
     next = adoptPersistedAssistantIntoLive(next, dbMsg, {
+      mode: "reload",
       appendIfMissing: false,
     }).messages;
   }
