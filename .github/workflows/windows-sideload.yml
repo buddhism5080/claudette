@@ -49,30 +49,22 @@ jobs:
         shell: bash
         run: scripts/stage-cli-sidecar.sh x86_64-pc-windows-msvc
 
-      - name: Install Tauri CLI
-        shell: bash
-        run: cargo install tauri-cli --version "^2" --locked
-
-      # createUpdaterArtifacts in tauri.conf.json requires a minisign key.
-      # Generate an ephemeral one so the NSIS bundle succeeds without
-      # upstream TAURI_SIGNING_* secrets. This is NOT Authenticode.
+      # createUpdaterArtifacts in tauri.conf.json needs a minisign key.
+      # Use PATH rather than stuffing the key into GITHUB_ENV — minisign
+      # private keys can contain the GITHUB_ENV heredoc delimiter.
       - name: Generate ephemeral updater signing key
         shell: bash
         run: |
           set -euo pipefail
           KEY="${RUNNER_TEMP}/tauri.key"
-          cargo tauri signer generate --write-keys "$KEY" --password sideload --force
-          {
-            echo "TAURI_SIGNING_PRIVATE_KEY<<EOF"
-            cat "$KEY"
-            echo "EOF"
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=sideload"
-          } >> "$GITHUB_ENV"
+          npx --yes @tauri-apps/cli@^2.9 signer generate --write-keys "$KEY" --password sideload --force
+          echo "TAURI_SIGNING_PRIVATE_KEY_PATH=${KEY}" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=sideload" >> "$GITHUB_ENV"
 
       - name: Build desktop exe and NSIS installer
         shell: bash
         run: |
-          cargo tauri build --verbose \
+          npx --yes @tauri-apps/cli@^2.9 build --verbose \
             --target x86_64-pc-windows-msvc \
             --bundles nsis \
             --features tauri/custom-protocol,alternative-backends
