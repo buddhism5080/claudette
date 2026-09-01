@@ -1355,6 +1355,29 @@ describe("MessagesWithTurns live stream order", () => {
     expect(container.textContent).toContain("now change it");
   });
 
+  it("keeps persisted thinking after the live timeline is cleared", async () => {
+    const assistant = message("assistant-1", "Assistant", "Patched.");
+    assistant.thinking = "I will edit the helper next.";
+    useAppStore.setState({
+      streamingTimeline: { [SESSION_ID]: [] },
+      showThinkingBlocks: { [SESSION_ID]: false },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "Fix it"), assistant]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning={false}
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    expect(container.textContent).toContain("Thinking");
+    expect(container.textContent).toContain("Patched.");
+  });
+
   it("renders live stream text as markdown, not raw source", async () => {
     useAppStore.setState({
       streamingTimeline: {

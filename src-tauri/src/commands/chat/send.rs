@@ -8,7 +8,7 @@ use claudette::agent::background::{
 };
 use claudette::agent::{
     self, AgentEvent, AgentSession, AgentSettings, ClaudeCodeHarness, CodexAppServerOptions,
-    CodexAppServerSession, CodexPermissionLevel, ControlRequestInner, FileAttachment,
+    CodexAppServerSession, CodexPermissionLevel, ControlRequestInner, Delta, FileAttachment,
     InnerStreamEvent, PersistentSessionStart, StartContentBlock, StreamEvent,
     is_codex_approval_tool_name, normalize_codex_reasoning_effort,
 };
@@ -18,7 +18,7 @@ use claudette::chat::{
     BuildAssistantArgs, CheckpointArgs, RequestedFlags, SessionFlags,
     assistant_usage_fields_from_result, build_assistant_chat_message, build_compaction_sentinel,
     build_permission_response, create_turn_checkpoint, extract_assistant_text,
-    extract_event_thinking, persistent_session_flags_drifted,
+    append_pending_thinking, extract_event_thinking, persistent_session_flags_drifted,
 };
 use claudette::db::Database;
 use claudette::env::WorkspaceEnv;
@@ -3147,6 +3147,20 @@ pub async fn send_chat_message(
                 latest_usage = Some(u.clone());
             }
 
+            // Thinking often arrives only as stream deltas; the later
+            // `assistant` event may be text-only. Accumulate here so the
+            // persisted row still has thinking after the turn ends.
+            if let AgentEvent::Stream(StreamEvent::Stream {
+                event:
+                    InnerStreamEvent::ContentBlockDelta {
+                        delta: Delta::Thinking { thinking },
+                        ..
+                    },
+            }) = &event
+            {
+                append_pending_thinking(&mut pending_thinking, thinking);
+            }
+
             if let AgentEvent::ProcessExited(code) = &event {
                 let exit_code = *code;
                 let app_state = app.state::<AppState>();
@@ -3268,14 +3282,13 @@ pub async fn send_chat_message(
                 }
 
                 // Accumulate thinking from this event.
-                if let Some(t) = extract_event_thinking(message) {
-                    pending_thinking = Some(match pending_thinking.take() {
-                        Some(mut existing) => {
-                            existing.push_str(&t);
-                            existing
-                        }
-                        None => t,
-                    });
+                // Accumulate thinking from this event only when stream
+                // deltas did not already fill the buffer (otherwise we
+                // would duplicate the same tokens).
+                if pending_thinking.is_none() {
+                    if let Some(t) = extract_event_thinking(message) {
+                        pending_thinking = Some(t);
+                    }
                 }
 
                 // Only save when we have text content — attach accumulated thinking.

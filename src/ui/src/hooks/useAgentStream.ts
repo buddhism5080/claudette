@@ -46,7 +46,9 @@ import {
   extractAssistantMessageParts,
   firstApprovalDetailString,
   initialToolInputJson,
+  mergeReloadedAssistantThinking,
 } from "./useAgentStreamLogic";
+import { thinkingFromTimeline } from "../components/chat/streamingTimeline";
 import {
   clearPromptStartTimeIfWorkspaceIdle,
   syncWorkspaceTurnStatus,
@@ -906,6 +908,9 @@ export function useAgentStream() {
                 created_at: new Date().toISOString(),
                 thinking:
                   useAppStore.getState().streamingThinking[sessionId] ||
+                  thinkingFromTimeline(
+                    useAppStore.getState().streamingTimeline[sessionId] || [],
+                  ) ||
                   thinking ||
                   null,
                 input_tokens: null,
@@ -1321,8 +1326,18 @@ export function useAgentStream() {
         .then(() => loadChatHistory(sessionId))
         .then((msgs) => {
           if (!msgs) return;
-          const filtered = msgs.filter(
-            (m: ChatMessage) => m.role !== "Assistant" || m.content.trim() !== "" || !!m.thinking,
+          const liveMessages =
+            useAppStore.getState().chatMessages[sessionId] || [];
+          const timelineThinking = thinkingFromTimeline(
+            useAppStore.getState().streamingTimeline[sessionId] || [],
+          );
+          const filtered = mergeReloadedAssistantThinking(
+            msgs.filter(
+              (m: ChatMessage) =>
+                m.role !== "Assistant" || m.content.trim() !== "" || !!m.thinking,
+            ),
+            liveMessages,
+            timelineThinking,
           );
           debugChat("stream", "checkpoint-reload-chat-history", {
             sessionId,

@@ -106,3 +106,44 @@ export function extractAssistantMessageParts(content: ContentBlock[]): {
     { text: "", thinking: "" },
   );
 }
+
+/**
+ * Checkpoint reload replaces live UUID messages with DB rows. Those rows
+ * often have empty `thinking` because the CLI's assistant event is
+ * text-only. Copy thinking from the live messages (matched by content)
+ * or from the still-mounted streaming timeline so the block survives
+ * turn end.
+ */
+export function mergeReloadedAssistantThinking<
+  T extends { role: string; content: string; thinking?: string | null },
+>(
+  dbMessages: T[],
+  liveMessages: readonly T[],
+  timelineThinking: string,
+): T[] {
+  const liveByContent = new Map<string, string>();
+  for (const msg of liveMessages) {
+    if (msg.role === "Assistant" && msg.thinking?.trim()) {
+      liveByContent.set(msg.content, msg.thinking);
+    }
+  }
+  const merged = dbMessages.map((msg) => {
+    if (msg.role !== "Assistant") return msg;
+    if (msg.thinking?.trim()) return msg;
+    const fromLive = liveByContent.get(msg.content);
+    if (fromLive) return { ...msg, thinking: fromLive };
+    return msg;
+  });
+  if (
+    timelineThinking.trim() &&
+    !merged.some((msg) => msg.role === "Assistant" && msg.thinking?.trim())
+  ) {
+    for (let i = merged.length - 1; i >= 0; i--) {
+      if (merged[i]?.role === "Assistant") {
+        merged[i] = { ...merged[i], thinking: timelineThinking };
+        break;
+      }
+    }
+  }
+  return merged;
+}

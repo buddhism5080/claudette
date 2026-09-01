@@ -171,6 +171,19 @@ pub fn extract_event_thinking(message: &AssistantMessage) -> Option<String> {
     }
 }
 
+/// Append a thinking delta (or a thinking-only assistant event) onto the
+/// turn's pending thinking buffer. Stream `thinking_delta` events are the
+/// source of truth when the later `assistant` event is text-only.
+pub fn append_pending_thinking(buffer: &mut Option<String>, chunk: &str) {
+    if chunk.is_empty() {
+        return;
+    }
+    match buffer {
+        Some(existing) => existing.push_str(chunk),
+        None => *buffer = Some(chunk.to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ChatMessage constructors
 // ---------------------------------------------------------------------------
@@ -823,6 +836,15 @@ mod tests {
             },
         ]);
         assert_eq!(extract_event_thinking(&m).as_deref(), Some("step1 step2"));
+    }
+
+    #[test]
+    fn append_pending_thinking_accumulates_deltas() {
+        let mut buf = None;
+        append_pending_thinking(&mut buf, "plan ");
+        append_pending_thinking(&mut buf, "the edit");
+        append_pending_thinking(&mut buf, "");
+        assert_eq!(buf.as_deref(), Some("plan the edit"));
     }
 
     // -- ChatMessage builders ----------------------------------------------

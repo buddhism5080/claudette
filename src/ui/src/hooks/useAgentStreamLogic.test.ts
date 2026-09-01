@@ -5,6 +5,7 @@ import {
   extractAssistantMessageParts,
   firstApprovalDetailString,
   initialToolInputJson,
+  mergeReloadedAssistantThinking,
   type CommandLineApplyDeps,
 } from "./useAgentStreamLogic";
 
@@ -99,6 +100,38 @@ describe("extractAssistantMessageParts", () => {
     ]);
 
     expect(parts).toEqual({ text: "Visible", thinking: "" });
+  });
+});
+
+describe("mergeReloadedAssistantThinking", () => {
+  it("copies live thinking onto DB rows matched by content", () => {
+    const merged = mergeReloadedAssistantThinking(
+      [
+        { role: "User", content: "hi", thinking: null },
+        { role: "Assistant", content: "Done.", thinking: null },
+      ],
+      [{ role: "Assistant", content: "Done.", thinking: "Check the file first." }],
+      "",
+    );
+    expect(merged[1]?.thinking).toBe("Check the file first.");
+  });
+
+  it("falls back to timeline thinking when live rows also lack it", () => {
+    const merged = mergeReloadedAssistantThinking(
+      [{ role: "Assistant", content: "Done.", thinking: null }],
+      [{ role: "Assistant", content: "Done.", thinking: null }],
+      "Plan the patch.",
+    );
+    expect(merged[0]?.thinking).toBe("Plan the patch.");
+  });
+
+  it("does not overwrite thinking the DB already persisted", () => {
+    const merged = mergeReloadedAssistantThinking(
+      [{ role: "Assistant", content: "Done.", thinking: "from db" }],
+      [{ role: "Assistant", content: "Done.", thinking: "from live" }],
+      "from timeline",
+    );
+    expect(merged[0]?.thinking).toBe("from db");
   });
 });
 

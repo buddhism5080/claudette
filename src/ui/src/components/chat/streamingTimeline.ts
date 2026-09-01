@@ -80,6 +80,15 @@ export function timelineHasVisibleContent(
   );
 }
 
+export function thinkingFromTimeline(
+  items: readonly StreamingTimelineItem[],
+): string {
+  return items
+    .filter((item) => item.type === "thinking")
+    .map((item) => item.content)
+    .join("");
+}
+
 export type CollapsedTimelineItem =
   | { type: "thinking"; id: string; content: string; active: boolean }
   | { type: "text"; id: string; content: string; active: boolean }
