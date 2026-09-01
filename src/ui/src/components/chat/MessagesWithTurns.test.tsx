@@ -1213,5 +1213,178 @@ describe("MessagesWithTurns live stream order", () => {
     expect(text).not.toContain("1 tool call");
     expect(text.match(/postgres/g)?.length).toBe(1);
   });
+
+  it("expands only the clicked same-server MCP group, not its siblings", async () => {
+    // Two postgres runs in one turn, split by assistant text, look like
+    // two identical "postgres" pills. Clicking one used to flip
+    // `turn.collapsed` because each position looked like a single-group
+    // turn, which expanded every same-name sibling.
+    const query: ToolActivity = {
+      toolUseId: "q1",
+      toolName: "mcp__postgres__query",
+      inputJson: "{}",
+      resultText: "1 row",
+      collapsed: true,
+      summary: "select 1",
+      assistantMessageOrdinal: 0,
+    };
+    const describe: ToolActivity = {
+      toolUseId: "q2",
+      toolName: "mcp__postgres__describe_table",
+      inputJson: "{}",
+      resultText: "ok",
+      collapsed: true,
+      summary: "public.users",
+      assistantMessageOrdinal: 1,
+    };
+    useAppStore.setState({
+      completedTurns: {
+        [SESSION_ID]: [
+          {
+            id: "turn-mcp",
+            activities: [query, describe],
+            messageCount: 3,
+            collapsed: true,
+            afterMessageIndex: 3,
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[
+          message("user-1", "User", "inspect db"),
+          message("assistant-1", "Assistant", "Ran the query."),
+          message("assistant-2", "Assistant", "Described the table."),
+        ]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning={false}
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    const headers = Array.from(
+      container.querySelectorAll('[role="button"][aria-label*="postgres"]'),
+    ) as HTMLElement[];
+    expect(headers).toHaveLength(2);
+    expect(headers.map((h) => h.getAttribute("aria-expanded"))).toEqual([
+      "false",
+      "false",
+    ]);
+
+    await act(async () => {
+      headers[0].click();
+    });
+
+    const headersAfter = Array.from(
+      container.querySelectorAll('[role="button"][aria-label*="postgres"]'),
+    ) as HTMLElement[];
+    expect(headersAfter.map((h) => h.getAttribute("aria-expanded"))).toEqual([
+      "true",
+      "false",
+    ]);
+  });
+
+  it("keeps earlier assistant text visible after sending a follow-up", async () => {
+    useAppStore.setState({
+      completedTurns: {
+        [SESSION_ID]: [
+          {
+            id: "turn-1",
+            activities: [
+              {
+                toolUseId: "read-old",
+                toolName: "Read",
+                inputJson: "{}",
+                resultText: "ok",
+                collapsed: true,
+                summary: "src/app.ts",
+                assistantMessageOrdinal: 0,
+              },
+            ],
+            messageCount: 2,
+            collapsed: true,
+            afterMessageIndex: 2,
+          },
+        ],
+      },
+      streamingTimeline: {
+        [SESSION_ID]: [
+          {
+            type: "thinking",
+            id: "th-new",
+            content: "planning the follow-up",
+            active: true,
+          },
+          { type: "tool", id: "read-new", toolUseId: "read-new" },
+        ],
+      },
+      toolActivities: {
+        [SESSION_ID]: [
+          {
+            toolUseId: "read-new",
+            toolName: "Read",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "src/app.ts",
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[
+          message("user-1", "User", "look at this"),
+          message("assistant-1", "Assistant", "I inspected the schema."),
+          message("user-2", "User", "now change it"),
+        ]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    expect(container.textContent).toContain("I inspected the schema.");
+    expect(container.textContent).toContain("now change it");
+  });
+
+  it("renders live stream text as markdown, not raw source", async () => {
+    useAppStore.setState({
+      streamingTimeline: {
+        [SESSION_ID]: [
+          {
+            type: "text",
+            id: "tx-0",
+            content: "Use **bold** and `code`.",
+            active: true,
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "format this")]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    const live = container.querySelector("[data-testid=live-stream-text]");
+    expect(live).not.toBeNull();
+    expect(live?.querySelector("strong")?.textContent).toBe("bold");
+    expect(live?.querySelector("code")?.textContent).toBe("code");
+    expect(live?.textContent).not.toContain("**bold**");
+  });
 });
 

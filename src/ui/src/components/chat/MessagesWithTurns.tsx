@@ -421,7 +421,20 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
       }
     });
 
-    return { groupsByPosition, finalFooterByPosition, positions };
+    const groupCountByTurnIdx: Record<number, number> = {};
+    for (const groups of Object.values(groupsByPosition)) {
+      for (const group of groups) {
+        groupCountByTurnIdx[group.globalIdx] =
+          (groupCountByTurnIdx[group.globalIdx] ?? 0) + 1;
+      }
+    }
+
+    return {
+      groupsByPosition,
+      finalFooterByPosition,
+      positions,
+      groupCountByTurnIdx,
+    };
   }, [
     completedTurns,
     findTriggeringUserIdx,
@@ -773,10 +786,13 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
             // map. Multi-group turns only mutate the per-group override —
             // touching `turn.collapsed` there would re-create the original
             // bug.
+            // Count groups across every message position, not just this
+            // one. A turn split by assistant text (MCP → text → MCP)
+            // looks like a single-group turn at each position, and
+            // toggling `turn.collapsed` would expand every same-name
+            // sibling.
             const isSingleGroupTurn =
-              (chronologicalTurnLayout.groupsByPosition[position] ?? []).filter(
-                (g) => g.globalIdx === globalIdx,
-              ).length === 1;
+              (chronologicalTurnLayout.groupCountByTurnIdx[globalIdx] ?? 0) <= 1;
             const onToggle = () => {
               const next = !collapsed;
               setCollapsedToolGroup(sessionId, groupKey, next);
@@ -874,6 +890,12 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
       !!pendingMessageId && messages.some((msg) => msg.id === pendingMessageId),
     [messages, pendingMessageId],
   );
+  const lastUserLocalIdx = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.role === "User") return i;
+    }
+    return -1;
+  }, [messages]);
   const timelineVisible = timelineHasVisibleContent(streamingTimeline);
   const timelineToolIds = useMemo(
     () => toolUseIdsInTimeline(streamingTimeline),
@@ -887,6 +909,7 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
         <LiveStreamingTimeline
           key={`streaming-tail-${position}`}
           sessionId={sessionId}
+          workspaceId={workspaceId}
           isStreaming={isRunning}
           toolDisplayMode={toolDisplayMode}
           searchQuery={searchQuery}
@@ -960,8 +983,16 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
         // not delete the block. While the live timeline is showing this turn,
         // skip the persisted bubble (and its thinking) to avoid duplicates.
         const pending = msg.id === pendingMessageId;
+        // Only the in-flight turn (assistant messages after the latest
+        // user prompt) is owned by the live timeline. Hiding every
+        // Assistant bubble while `isRunning` made prior replies vanish
+        // as soon as a follow-up was sent, leaving only tool pills.
         const liveTimelineOwnsTurn =
-          isRunning && timelineVisible && msg.role === "Assistant";
+          isRunning &&
+          timelineVisible &&
+          msg.role === "Assistant" &&
+          lastUserLocalIdx >= 0 &&
+          idx > lastUserLocalIdx;
         const assistantThinking =
           !liveTimelineOwnsTurn && msg.role === "Assistant" && msg.thinking ? (
             <ThinkingBlock

@@ -208,6 +208,12 @@ export function TurnSummary({
             tabIndex={0}
             aria-expanded={isExpanded}
             aria-controls={activitiesId}
+            aria-label={`${isExpanded ? "Collapse" : "Expand"} ${
+              label ??
+              `${visibleActivities.length} tool call${
+                visibleActivities.length !== 1 ? "s" : ""
+              }`
+            }`}
             onClick={onToggle}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
