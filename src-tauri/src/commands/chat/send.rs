@@ -512,14 +512,36 @@ fn remote_control_reconnecting_status(
 
 fn should_resume_persistent_session(
     saved_session_id: &str,
-    saved_turn_count: u32,
+    _saved_turn_count: u32,
     has_persisted_claude_session: bool,
 ) -> bool {
-    // `has_persisted_claude_session` must mean "JSONL exists on disk", not
-    // merely "chat_sessions.session_id is non-empty". Rollback writes a
-    // placeholder UUID with turn_count=0; resuming it aborts the CLI
-    // before any API request.
-    !saved_session_id.trim().is_empty() && (has_persisted_claude_session || saved_turn_count > 1)
+    // Resume only when a real Claude JSONL exists. `turn_count > 1` used to
+    // force resume even without a transcript. After a failed post-rollback
+    // send the DB still holds the placeholder sid with turn_count=1; the
+    // next send increments to 2 and would `--resume` a missing file, so
+    // the CLI exits with no API call. JSONL on disk is the only signal.
+    !saved_session_id.trim().is_empty() && has_persisted_claude_session
+}
+
+/// When Claude has no transcript (rollback / lost JSONL / app restart after
+/// minting a placeholder sid), seed the next turn from surviving chat rows
+/// so the model still sees the truncated conversation.
+fn seed_missing_transcript_prelude(
+    session: &mut AgentSessionState,
+    messages: &[ChatMessage],
+    current_user_message_id: &str,
+) {
+    if session.pending_history_prelude.is_some() {
+        return;
+    }
+    let prior: Vec<ChatMessage> = messages
+        .iter()
+        .filter(|m| m.id != current_user_message_id)
+        .filter(|m| !matches!(m.role, ChatRole::System))
+        .cloned()
+        .collect();
+    session.pending_history_prelude =
+        claudette::agent::history_seeder::build_migration_prelude(&prior);
 }
 
 /// Resolve the session id to launch claude with, given whether we intend to
@@ -1301,6 +1323,14 @@ pub async fn send_chat_message(
         // still launches with the same repo-level prompt a normal first turn
         // would have used.
         session.custom_instructions = instructions.clone();
+    }
+    // Old rolled-back sessions (and rollback + app restart) lose the
+    // in-memory prelude. If there is no JSONL to `--resume`, rebuild it
+    // from surviving rows so the next send still has conversation context.
+    if !has_persisted_claude_session && session.pending_history_prelude.is_none() {
+        if let Ok(messages) = db.list_chat_messages_for_session(&chat_session_id) {
+            seed_missing_transcript_prelude(session, &messages, &user_msg.id);
+        }
     }
 
     // Clear any unresolved permission requests so the CLI doesn't hang when
@@ -3435,7 +3465,8 @@ mod tests {
         remote_control_requested_or_active_for_turn,
         remote_control_should_defer_drift_teardown_for_turn,
         remote_control_should_restore_for_turn, remote_control_title, resolve_spawn_session_id,
-        route_control_request_session_state, should_reenable_remote_control_after_turn_result,
+        route_control_request_session_state, seed_missing_transcript_prelude,
+        should_reenable_remote_control_after_turn_result,
         should_resume_persistent_session, should_run_auto_naming,
     };
     use crate::state::{
@@ -3699,7 +3730,10 @@ mod tests {
     #[test]
     fn resume_does_not_treat_fresh_first_turn_uuid_as_history() {
         assert!(!should_resume_persistent_session("fresh-uuid", 1, false));
-        assert!(should_resume_persistent_session("fresh-uuid", 2, false));
+        assert!(
+            !should_resume_persistent_session("fresh-uuid", 2, false),
+            "turn_count>1 without a JSONL must not --resume (old rolled-back sessions)"
+        );
         assert!(!should_resume_persistent_session("", 9, true));
     }
 
@@ -3714,9 +3748,39 @@ mod tests {
             "post-rollback first send must start a fresh session"
         );
         assert!(
+            !should_resume_persistent_session("minted-after-rollback", 2, false),
+            "a failed post-rollback send that bumped turn_count still must not resume"
+        );
+        assert!(
             should_resume_persistent_session("minted-after-rollback", 1, true),
             "the footgun: treating a placeholder sid as persisted WOULD resume"
         );
+    }
+
+    #[test]
+    fn missing_jsonl_seeds_prelude_from_surviving_messages() {
+        let mut session = test_agent_session_state();
+        let mut prior = test_chat_message(ChatRole::User, "what is the bug");
+        prior.id = "old-user".into();
+        let mut reply = test_chat_message(ChatRole::Assistant, "invalid uuid on resume");
+        reply.id = "old-asst".into();
+        let mut current = test_chat_message(ChatRole::User, "try again");
+        current.id = "new-user".into();
+        seed_missing_transcript_prelude(
+            &mut session,
+            &[prior, reply, current.clone()],
+            &current.id,
+        );
+        let prelude = session
+            .pending_history_prelude
+            .clone()
+            .expect("prelude");
+        assert!(prelude.contains("what is the bug"));
+        assert!(prelude.contains("invalid uuid on resume"));
+        assert!(!prelude.contains("try again"));
+        let existing = session.pending_history_prelude.clone();
+        seed_missing_transcript_prelude(&mut session, &[], "x");
+        assert_eq!(session.pending_history_prelude, existing);
     }
 
     #[test]
