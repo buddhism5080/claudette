@@ -33,7 +33,9 @@ export function ThinkingBlock({
     enabled: !!enableTypewriter && isExpanded,
   });
 
-  if (!content) return null;
+  // Live thinking must still show the "Thinking…" header before the first
+  // token. Collapsed-with-no-content used to make the whole stream look empty.
+  if (!content && !isStreaming) return null;
 
   const visibleContent = enableTypewriter ? displayed : content;
   const contentNode = (

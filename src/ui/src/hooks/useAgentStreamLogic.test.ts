@@ -5,6 +5,7 @@ import {
   extractAssistantMessageParts,
   firstApprovalDetailString,
   initialToolInputJson,
+  livePartFromContentBlockDelta,
   mergeReloadedAssistantThinking,
   adoptPersistedAssistantIntoLive,
   reattachPersistedAssistantsKeepingLiveOrder,
@@ -102,6 +103,48 @@ describe("extractAssistantMessageParts", () => {
     ]);
 
     expect(parts).toEqual({ text: "Visible", thinking: "" });
+  });
+});
+
+describe("livePartFromContentBlockDelta", () => {
+  it("maps thinking_delta onto a thinking part", () => {
+    expect(
+      livePartFromContentBlockDelta(
+        { type: "thinking_delta", thinking: "plan the edit" },
+        undefined,
+        0,
+      ),
+    ).toEqual({ type: "thinking", text: "plan the edit" });
+  });
+
+  it("maps thinking_delta.text when the CLI uses the text field", () => {
+    expect(
+      livePartFromContentBlockDelta(
+        { type: "thinking_delta", text: "via text field" },
+        undefined,
+        0,
+      ),
+    ).toEqual({ type: "thinking", text: "via text field" });
+  });
+
+  it("treats text_delta on a thinking block index as thinking, not body text", () => {
+    expect(
+      livePartFromContentBlockDelta(
+        { type: "text_delta", text: "still thinking" },
+        new Set([2]),
+        2,
+      ),
+    ).toEqual({ type: "thinking", text: "still thinking" });
+  });
+
+  it("keeps text_delta on a non-thinking index as body text", () => {
+    expect(
+      livePartFromContentBlockDelta(
+        { type: "text_delta", text: "hello" },
+        new Set([0]),
+        1,
+      ),
+    ).toEqual({ type: "text", text: "hello" });
   });
 });
 

@@ -987,7 +987,7 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
         // the Eye chip only controls default-expanded vs collapsed.
         const liveId = liveAssistantMessageId;
         const assistantThinking =
-          msg.role === "Assistant" && msg.thinking ? (
+          msg.role === "Assistant" && msg.thinking != null ? (
             <ThinkingBlock
               content={msg.thinking}
               isStreaming={isRunning && liveId === msg.id}

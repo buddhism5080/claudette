@@ -340,6 +340,17 @@ describe("appendLiveAssistantPart", () => {
     expect(msgs[0]?.content).toBe("Done.");
   });
 
+  it("opens a thinking row on empty thinking so Thinking… can render before tokens", () => {
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "thinking",
+      text: "",
+    });
+    const msgs = useAppStore.getState().chatMessages[WS_ID] ?? [];
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]?.thinking).toBe("");
+    expect(useAppStore.getState().liveAssistantMessageId[WS_ID]).toBe(msgs[0]?.id);
+  });
+
   it("starts a new message after seal (tool boundary)", () => {
     useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
       type: "thinking",

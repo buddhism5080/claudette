@@ -90,6 +90,13 @@ export function initialToolInputJson(input: unknown): string {
   }
 }
 
+export function thinkingTextFromBlock(block: ContentBlock): string {
+  if (block.type !== "thinking") return "";
+  if (block.thinking) return block.thinking;
+  if ("text" in block && typeof block.text === "string") return block.text;
+  return "";
+}
+
 export function extractAssistantMessageParts(content: ContentBlock[]): {
   text: string;
   thinking: string;
@@ -99,12 +106,34 @@ export function extractAssistantMessageParts(content: ContentBlock[]): {
       if (block.type === "text") {
         parts.text += block.text;
       } else if (block.type === "thinking") {
-        parts.thinking += block.thinking;
+        parts.thinking += thinkingTextFromBlock(block);
       }
       return parts;
     },
     { text: "", thinking: "" },
   );
+}
+
+/** Map a content_block_delta onto the live chatMessages part. Thinking
+ *  blocks sometimes arrive as thinking_delta, sometimes as text_delta on a
+ *  block that started as type=thinking. Either must become msg.thinking —
+ *  the live StreamingThinkingBlock lane is no longer mounted. */
+export function livePartFromContentBlockDelta(
+  delta: { type?: string; thinking?: string; text?: string } | undefined,
+  thinkingBlockIndexes: Set<number> | undefined,
+  index: number,
+): { type: "thinking" | "text"; text: string } | null {
+  if (!delta || typeof delta !== "object") return null;
+  const asThinkingBlock = thinkingBlockIndexes?.has(index) === true;
+  if (delta.type === "thinking_delta" || asThinkingBlock) {
+    const text = delta.thinking || delta.text || "";
+    if (!text) return null;
+    return { type: "thinking", text };
+  }
+  if (delta.type === "text_delta" && delta.text) {
+    return { type: "text", text: delta.text };
+  }
+  return null;
 }
 
 /**

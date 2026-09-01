@@ -401,7 +401,11 @@ pub enum Delta {
     },
 
     #[serde(rename = "thinking_delta")]
-    Thinking { thinking: String },
+    Thinking {
+        /// Anthropic uses `thinking`; some CLI builds have used `text`.
+        #[serde(default, alias = "text")]
+        thinking: String,
+    },
 
     #[serde(other)]
     Unknown,
@@ -490,7 +494,10 @@ pub enum ContentBlock {
     Text { text: String },
 
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        #[serde(default, alias = "text")]
+        thinking: String,
+    },
 
     #[serde(rename = "tool_use")]
     ToolUse { id: String, name: String },
@@ -721,6 +728,22 @@ mod tests {
                         _ => panic!("Expected ThinkingDelta"),
                     }
                 }
+                _ => panic!("Expected ContentBlockDelta"),
+            },
+            _ => panic!("Expected Stream event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_thinking_delta_text_field_alias() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","text":"via text field"}}}"#;
+        let event = parse_stream_line(line).unwrap();
+        match event {
+            StreamEvent::Stream { event } => match event {
+                InnerStreamEvent::ContentBlockDelta { delta, .. } => match delta {
+                    Delta::Thinking { thinking } => assert_eq!(thinking, "via text field"),
+                    other => panic!("Expected ThinkingDelta, got {other:?}"),
+                },
                 _ => panic!("Expected ContentBlockDelta"),
             },
             _ => panic!("Expected Stream event"),

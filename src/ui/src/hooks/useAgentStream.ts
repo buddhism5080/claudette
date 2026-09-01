@@ -11,7 +11,6 @@ import {
 import { reconcileAgentStatesOnTerminal } from "../types/workflow";
 import { workflowLaunchTaskId } from "../components/chat/workflowMeta";
 import {
-  loadChatHistory,
   saveTurnToolActivities,
   updateTurnToolActivityProgress,
   setSessionCliInvocation,
@@ -36,7 +35,6 @@ import {
   clearBlockToolsForSession,
 } from "./blockToolMap";
 import { debugChat } from "../utils/chatDebug";
-import { extractLatestCallUsage } from "../utils/extractLatestCallUsage";
 import { buildCompactionSentinel } from "../utils/compactionSentinel";
 import { pickMeterUsageFromResult } from "./pickMeterUsageFromResult";
 import { setPlanModeAndPersist } from "../components/chat/planModePersistence";
@@ -47,10 +45,8 @@ import {
   extractAssistantMessageParts,
   firstApprovalDetailString,
   initialToolInputJson,
-  mergeReloadedAssistantThinking,
-  reattachPersistedAssistantsKeepingLiveOrder,
+  livePartFromContentBlockDelta,
 } from "./useAgentStreamLogic";
-import { thinkingFromTimeline } from "../components/chat/streamingTimeline";
 import {
   clearPromptStartTimeIfWorkspaceIdle,
   syncWorkspaceTurnStatus,
@@ -702,13 +698,23 @@ export function useAgentStream() {
                 }
                 case "content_block_delta": {
                   const delta = inner.delta;
-                  if ("type" in delta && delta.type === "text_delta") {
-                    appendStreamingContent(sessionId, delta.text);
-                    appendStreamingTimelineDelta(sessionId, "text", delta.text);
-                    appendLiveAssistantPart(sessionId, wsId, {
-                      type: "text",
-                      text: delta.text,
-                    });
+                  const part = livePartFromContentBlockDelta(
+                    delta,
+                    thinkingBlocksRef.current[sessionId],
+                    inner.index,
+                  );
+                  if (part?.type === "text") {
+                    appendStreamingContent(sessionId, part.text);
+                    appendStreamingTimelineDelta(sessionId, "text", part.text);
+                    appendLiveAssistantPart(sessionId, wsId, part);
+                  } else if (part?.type === "thinking") {
+                    appendStreamingThinking(sessionId, part.text);
+                    appendStreamingTimelineDelta(
+                      sessionId,
+                      "thinking",
+                      part.text,
+                    );
+                    appendLiveAssistantPart(sessionId, wsId, part);
                   }
                   if (
                     "type" in delta &&
@@ -746,23 +752,6 @@ export function useAgentStream() {
                       );
                     }
                   }
-                  if (
-                    "type" in delta &&
-                    delta.type === "thinking_delta" &&
-                    "thinking" in delta &&
-                    delta.thinking
-                  ) {
-                    appendStreamingThinking(sessionId, delta.thinking);
-                    appendStreamingTimelineDelta(
-                      sessionId,
-                      "thinking",
-                      delta.thinking,
-                    );
-                    appendLiveAssistantPart(sessionId, wsId, {
-                      type: "thinking",
-                      text: delta.thinking,
-                    });
-                  }
                   break;
                 }
                 case "content_block_start": {
@@ -772,13 +761,16 @@ export function useAgentStream() {
                     inner.content_block.type === "thinking"
                   ) {
                     (thinkingBlocksRef.current[sessionId] ??= new Set()).add(inner.index);
-                    // Freeze the previous thinking/text block in the timeline.
-                    // Do NOT clear streamingThinking — that hid the tokens the
-                    // API already sent as soon as the next block (often a
-                    // tool_use) started.
                     startStreamingTimelineBlock(sessionId, {
                       type: "thinking",
                       id: `thinking-${inner.index}`,
+                    });
+                    // Open a live chatMessages row immediately so ThinkingBlock
+                    // can show "Thinking…" before the first delta. The parallel
+                    // streamingThinking / timeline lanes are not mounted.
+                    appendLiveAssistantPart(sessionId, wsId, {
+                      type: "thinking",
+                      text: "",
                     });
                   }
                   if (
@@ -1265,7 +1257,6 @@ export function useAgentStream() {
 
   // Listen for checkpoint-created events from the backend.
   const addCheckpoint = useAppStore((s) => s.addCheckpoint);
-  const setChatMessages = useAppStore((s) => s.setChatMessages);
   useEffect(() => {
     let active = true;
     const unlisten = listen<{
@@ -1278,13 +1269,9 @@ export function useAgentStream() {
       addCheckpoint(sessionId, checkpoint);
       turnCheckpointIdRef.current[sessionId] = checkpoint.id;
 
-      // Persist tool activities for the just-completed turn, then reload
-      // messages so the store has DB-persisted IDs. The save MUST complete
-      // before any subsequent loadCompletedTurns() reads, otherwise the DB
-      // snapshot will be stale and overwrite the in-memory turns.
-      // NOTE: checkpoint-created fires BEFORE the agent-stream result event,
-      // so finalizeTurn() hasn't run yet. Read from toolActivities (pre-
-      // finalization) and turnMessageCountRef instead of completedTurns.
+      // Persist tool activities for replay after app restart. Do not
+      // loadChatHistory / setChatMessages — live chatMessages is the
+      // transcript; DB ids are adopted via chat-message as rows persist.
       const currentActivities = useAppStore.getState().toolActivities[sessionId] || [];
       debugChat("stream", "checkpoint-created", {
         sessionId,
@@ -1323,9 +1310,6 @@ export function useAgentStream() {
           })()
         : Promise.resolve();
 
-      // Wait for the save to finish, then reload messages so the store has
-      // the persisted message IDs (frontend assigns its own UUIDs during
-      // streaming, which won't match checkpoint.message_id).
       savePromise
         .then(() => {
           debugChat("stream", "checkpoint-save-complete", {
@@ -1340,57 +1324,13 @@ export function useAgentStream() {
             checkpointId: checkpoint.id,
             error: String(e),
           });
-        })
-        .then(() => loadChatHistory(sessionId))
-        .then((msgs) => {
-          if (!msgs) return;
-          const liveMessages =
-            useAppStore.getState().chatMessages[sessionId] || [];
-          const timelineThinking = thinkingFromTimeline(
-            useAppStore.getState().streamingTimeline[sessionId] || [],
-          );
-          // Keep the live arrival order. Replacing with DB order dumped
-          // later assistant text to the bottom and dropped thinking-only
-          // rows that had not been paired 1:1 with DB events.
-          const filtered = mergeReloadedAssistantThinking(
-            reattachPersistedAssistantsKeepingLiveOrder(
-              liveMessages,
-              msgs.filter(
-                (m: ChatMessage) =>
-                  m.role !== "Assistant" ||
-                  m.content.trim() !== "" ||
-                  !!m.thinking,
-              ),
-            ),
-            liveMessages,
-            timelineThinking,
-          );
-          debugChat("stream", "checkpoint-reload-chat-history", {
-            sessionId,
-            checkpointId: checkpoint.id,
-            messageCount: filtered.length,
-            messageIds: filtered.map((msg) => msg.id),
-          });
-          setChatMessages(sessionId, filtered);
-          const callUsage = extractLatestCallUsage(filtered);
-          const { setLatestTurnUsage, clearLatestTurnUsage } =
-            useAppStore.getState();
-          if (callUsage) setLatestTurnUsage(sessionId, callUsage);
-          // Preserve the just-emitted result.usage when the CLI does not also
-          // write token metadata onto assistant messages (observed with
-          // Claude Code gateway backends). Initial history loads still clear
-          // stale meter state when no persisted token data exists.
-          else if (!useAppStore.getState().latestTurnUsage[sessionId]) {
-            clearLatestTurnUsage(sessionId);
-          }
-        })
-        .catch((e) => console.error("Failed to reload messages after checkpoint:", e));
+        });
     });
     return () => {
       active = false;
       unlisten.then((fn) => fn());
     };
-  }, [addCheckpoint, setChatMessages]);
+  }, [addCheckpoint]);
 
   // Listen for workspace-renamed events (auto-rename after first prompt).
   useEffect(() => {

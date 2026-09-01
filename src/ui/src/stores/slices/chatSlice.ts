@@ -543,13 +543,16 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
     })),
   appendLiveAssistantPart: (sessionId, workspaceId, part) =>
     set((s) => {
-      if (!part.text) return s;
+      // Empty thinking still opens a live row so ThinkingBlock can show
+      // "Thinking…" on content_block_start before the first delta.
+      if (!part.text && part.type !== "thinking") return s;
       const msgs = s.chatMessages[sessionId] || [];
       const liveId = s.liveAssistantMessageId[sessionId];
       const liveIdx = liveId
         ? msgs.findIndex((msg) => msg.id === liveId)
         : -1;
       if (liveIdx >= 0) {
+        if (!part.text) return s;
         const msg = msgs[liveIdx]!;
         const updated = {
           ...msg,
