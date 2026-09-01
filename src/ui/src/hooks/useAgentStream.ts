@@ -43,10 +43,12 @@ import { setPlanModeAndPersist } from "../components/chat/planModePersistence";
 import {
   applyCommandLineEvent,
   approvalDetailValue,
+  assistantContentsMatch,
   extractAssistantMessageParts,
   firstApprovalDetailString,
   initialToolInputJson,
   mergeReloadedAssistantThinking,
+  reattachPersistedAssistantsKeepingLiveOrder,
 } from "./useAgentStreamLogic";
 import { thinkingFromTimeline } from "../components/chat/streamingTimeline";
 import {
@@ -894,46 +896,50 @@ export function useAgentStream() {
             break;
           }
           case "assistant": {
-            // Deltas already upserted the visible ChatMessage. Do not add a
-            // second bubble or hide the one the user is looking at.
+            // Deltas already upserted the visible ChatMessage. Never append a
+            // second bubble — that dumped the full text at the bottom when
+            // the complete assistant event's joined blocks didn't exactly
+            // equal a live row.
             const { text, thinking } = extractAssistantMessageParts(
               streamEvent.message.content,
             );
             if (text) {
               turnMessageCountRef.current[sessionId] =
                 (turnMessageCountRef.current[sessionId] || 0) + 1;
+            }
+            if (thinking) {
               const msgs =
                 useAppStore.getState().chatMessages[sessionId] || [];
-              const already = msgs.some(
-                (m) => m.role === "Assistant" && m.content === text,
-              );
-              if (!already) {
-                addChatMessage(sessionId, {
-                  id: crypto.randomUUID(),
-                  workspace_id: wsId,
-                  chat_session_id: sessionId,
-                  role: "Assistant",
-                  content: text,
-                  cost_usd: null,
-                  duration_ms: null,
-                  created_at: new Date().toISOString(),
-                  thinking:
-                    useAppStore.getState().streamingThinking[sessionId] ||
-                    thinking ||
-                    null,
-                  input_tokens: null,
-                  output_tokens: null,
-                  cache_read_tokens: null,
-                  cache_creation_tokens: null,
+              const liveId =
+                useAppStore.getState().liveAssistantMessageId[sessionId];
+              const idx = msgs.findIndex((m, i) => {
+                if (m.role !== "Assistant") return false;
+                if (liveId && m.id === liveId) return true;
+                if (text && assistantContentsMatch(m.content, text)) return true;
+                return (
+                  i === msgs.length - 1 &&
+                  m.role === "Assistant" &&
+                  !m.thinking?.trim()
+                );
+              });
+              if (idx >= 0 && !msgs[idx]!.thinking?.trim()) {
+                const updated = { ...msgs[idx]!, thinking };
+                useAppStore.setState((s) => ({
+                  chatMessages: {
+                    ...s.chatMessages,
+                    [sessionId]: s.chatMessages[sessionId]!.map((m, i) =>
+                      i === idx ? updated : m,
+                    ),
+                  },
+                }));
+              } else if (idx < 0) {
+                appendLiveAssistantPart(sessionId, wsId, {
+                  type: "thinking",
+                  text: thinking,
                 });
               }
-              clearStreamingThinking(sessionId);
-            } else if (thinking) {
-              appendLiveAssistantPart(sessionId, wsId, {
-                type: "thinking",
-                text: thinking,
-              });
             }
+            clearStreamingThinking(sessionId);
             setStreamingContent(sessionId, "");
             break;
           }
@@ -1343,10 +1349,18 @@ export function useAgentStream() {
           const timelineThinking = thinkingFromTimeline(
             useAppStore.getState().streamingTimeline[sessionId] || [],
           );
+          // Keep the live arrival order. Replacing with DB order dumped
+          // later assistant text to the bottom and dropped thinking-only
+          // rows that had not been paired 1:1 with DB events.
           const filtered = mergeReloadedAssistantThinking(
-            msgs.filter(
-              (m: ChatMessage) =>
-                m.role !== "Assistant" || m.content.trim() !== "" || !!m.thinking,
+            reattachPersistedAssistantsKeepingLiveOrder(
+              liveMessages,
+              msgs.filter(
+                (m: ChatMessage) =>
+                  m.role !== "Assistant" ||
+                  m.content.trim() !== "" ||
+                  !!m.thinking,
+              ),
             ),
             liveMessages,
             timelineThinking,

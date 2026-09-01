@@ -991,7 +991,7 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
             <ThinkingBlock
               content={msg.thinking}
               isStreaming={isRunning && liveId === msg.id}
-              defaultExpanded={showThinkingBlocks || (isRunning && liveId === msg.id)}
+              defaultExpanded={showThinkingBlocks || isRunning}
               inline={toolDisplayMode === "inline"}
               searchQuery={searchQuery}
             />

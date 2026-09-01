@@ -7,6 +7,7 @@ import {
   initialToolInputJson,
   mergeReloadedAssistantThinking,
   adoptPersistedAssistantIntoLive,
+  reattachPersistedAssistantsKeepingLiveOrder,
   type CommandLineApplyDeps,
 } from "./useAgentStreamLogic";
 
@@ -170,6 +171,48 @@ describe("adoptPersistedAssistantIntoLive", () => {
     );
     expect(adoptedFromId).toBe("live-th");
     expect(messages[0]?.id).toBe("db-th");
+  });
+
+  it("matches a live prefix of the persisted content so streaming rows adopt", () => {
+    const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
+      [{ id: "live-1", role: "Assistant", content: "规格要先改", thinking: null }],
+      { id: "db-1", role: "Assistant", content: "规格要先改：整棵跳过。", thinking: null },
+    );
+    expect(adoptedFromId).toBe("live-1");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.content).toBe("规格要先改：整棵跳过。");
+  });
+
+  it("does not append when appendIfMissing is false", () => {
+    const live = [
+      { id: "live-1", role: "Assistant" as const, content: "first", thinking: null },
+    ];
+    const { messages, adoptedFromId } = adoptPersistedAssistantIntoLive(
+      live,
+      { id: "db-extra", role: "Assistant", content: "dumped at bottom", thinking: null },
+      { appendIfMissing: false },
+    );
+    expect(adoptedFromId).toBeNull();
+    expect(messages).toEqual(live);
+  });
+});
+
+describe("reattachPersistedAssistantsKeepingLiveOrder", () => {
+  it("keeps live order and does not dump extra DB text at the end", () => {
+    const live = [
+      { id: "u", role: "User" as const, content: "go", thinking: null },
+      { id: "live-a", role: "Assistant" as const, content: "mid", thinking: "plan" },
+      { id: "live-b", role: "Assistant" as const, content: "later", thinking: null },
+    ];
+    const db = [
+      { id: "db-a", role: "Assistant" as const, content: "mid", thinking: "plan" },
+      { id: "db-b", role: "Assistant" as const, content: "later", thinking: null },
+      { id: "db-extra", role: "Assistant" as const, content: "规格先改…", thinking: null },
+    ];
+    const next = reattachPersistedAssistantsKeepingLiveOrder(live, db);
+    expect(next.map((m) => m.id)).toEqual(["u", "db-a", "db-b"]);
+    expect(next.map((m) => m.content)).not.toContain("规格先改…");
+    expect(next[1]?.thinking).toBe("plan");
   });
 });
 

@@ -153,22 +153,34 @@ export function reconcileReloadedTranscript<
   return merged;
 }
 
+export function assistantContentsMatch(live: string, persisted: string): boolean {
+  const a = live.trim();
+  const b = persisted.trim();
+  if (!a || !b) return false;
+  return a === b || b.startsWith(a) || a.startsWith(b);
+}
+
 export function adoptPersistedAssistantIntoLive<
   T extends { id: string; role: string; content: string; thinking?: string | null },
 >(
   live: T[],
   persisted: T,
+  opts: { appendIfMissing?: boolean } = {},
 ): { messages: T[]; adoptedFromId: string | null } {
+  const appendIfMissing = opts.appendIfMissing !== false;
   if (persisted.role !== "Assistant") {
     if (live.some((msg) => msg.id === persisted.id)) {
       return { messages: live, adoptedFromId: persisted.id };
     }
-    return { messages: [...live, persisted], adoptedFromId: null };
+    return {
+      messages: appendIfMissing ? [...live, persisted] : live,
+      adoptedFromId: null,
+    };
   }
   const idx = live.findIndex((msg) => {
     if (msg.id === persisted.id) return true;
     if (msg.role !== "Assistant") return false;
-    if (msg.content && persisted.content && msg.content === persisted.content) {
+    if (assistantContentsMatch(msg.content, persisted.content)) {
       return true;
     }
     if (!msg.content.trim() && !persisted.content.trim()) {
@@ -179,7 +191,10 @@ export function adoptPersistedAssistantIntoLive<
     return false;
   });
   if (idx < 0) {
-    return { messages: [...live, persisted], adoptedFromId: null };
+    return {
+      messages: appendIfMissing ? [...live, persisted] : live,
+      adoptedFromId: null,
+    };
   }
   const oldId = live[idx]!.id;
   const messages = live.map((msg, i) =>
@@ -193,4 +208,18 @@ export function adoptPersistedAssistantIntoLive<
       : msg,
   );
   return { messages, adoptedFromId: oldId };
+}
+
+/** Checkpoint reload must keep live arrival order. Only swap DB ids / thinking. */
+export function reattachPersistedAssistantsKeepingLiveOrder<
+  T extends { id: string; role: string; content: string; thinking?: string | null },
+>(live: T[], dbMessages: T[]): T[] {
+  let next = live;
+  for (const dbMsg of dbMessages) {
+    if (dbMsg.role !== "Assistant") continue;
+    next = adoptPersistedAssistantIntoLive(next, dbMsg, {
+      appendIfMissing: false,
+    }).messages;
+  }
+  return mergeReloadedAssistantThinking(next, live, "");
 }

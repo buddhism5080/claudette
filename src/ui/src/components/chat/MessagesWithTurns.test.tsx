@@ -1336,6 +1336,27 @@ describe("MessagesWithTurns live stream order", () => {
     expect(container.textContent).toContain("Patched.");
   });
 
+  it("expands thinking during a running turn even if the Eye chip is off", async () => {
+    const assistant = message("assistant-1", "Assistant", "Patched.");
+    assistant.thinking = "I will edit the helper next.";
+    useAppStore.setState({
+      showThinkingBlocks: { [SESSION_ID]: false },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "Fix it"), assistant]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    expect(container.textContent).toContain("I will edit the helper next.");
+  });
+
   it("renders live stream text as markdown, not raw source", async () => {
     const assistant = message("assistant-1", "Assistant", "Use **bold** and `code`.");
     const container = await render(
