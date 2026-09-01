@@ -4,7 +4,6 @@ import type { CompletedTurn, ToolActivity } from "../../stores/useAppStore";
 import type { TaskTrackerResult } from "../../hooks/useTaskTracker";
 import styles from "./ChatPanel.module.css";
 import { TurnFooter } from "./TurnFooter";
-import { TaskProgressBar } from "./TaskProgressBar";
 import { activityMatchesSearch } from "./agentToolCallRendering";
 import { toolColor } from "./chatHelpers";
 import { AgentToolCallGroup } from "./AgentToolCallGroup";
@@ -53,7 +52,7 @@ export function TurnSummary({
   showFooter = true,
   collapsed,
   onToggle,
-  taskProgress,
+  taskProgress: _taskProgress,
   assistantText,
   onFork,
   onRollback,
@@ -238,8 +237,6 @@ export function TurnSummary({
                   visibleActivities.length !== 1 ? "s" : ""
                 }`
               )}
-              {showFooter && turn.messageCount > 0 &&
-                `, ${turn.messageCount} message${turn.messageCount !== 1 ? "s" : ""}`}
             </span>
           </div>
           {isExpanded && (
@@ -248,12 +245,6 @@ export function TurnSummary({
             </div>
           )}
         </div>
-      )}
-      {taskProgress && taskProgress.totalCount > 0 && (
-        <TaskProgressBar
-          completedCount={taskProgress.completedCount}
-          totalCount={taskProgress.totalCount}
-        />
       )}
       {editSummary && (
         <TurnEditSummaryCard

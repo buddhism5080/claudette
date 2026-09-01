@@ -1044,9 +1044,10 @@ describe("MessagesWithTurns live stream order", () => {
     expect(secondThought).toBeGreaterThan(tool);
   });
 
-  it("shows persisted assistant thinking before ordinal-0 tools, then the answer text", async () => {
-    const assistant = message("assistant-1", "Assistant", "Patched.");
-    assistant.thinking = "Need to inspect the helper.";
+  it("shows thinking, then tools, then later text when they are separate messages", async () => {
+    const first = message("assistant-1", "Assistant", "");
+    first.thinking = "Need to inspect the helper.";
+    const second = message("assistant-2", "Assistant", "Patched.");
     useAppStore.setState({
       showThinkingBlocks: { [SESSION_ID]: true },
       completedTurns: {
@@ -1066,7 +1067,7 @@ describe("MessagesWithTurns live stream order", () => {
             ],
             messageCount: 2,
             collapsed: false,
-            afterMessageIndex: 2,
+            afterMessageIndex: 3,
           },
         ],
       },
@@ -1074,7 +1075,7 @@ describe("MessagesWithTurns live stream order", () => {
 
     const container = await render(
       <MessagesWithTurns
-        messages={[message("user-1", "User", "Fix the bug"), assistant]}
+        messages={[message("user-1", "User", "Fix the bug"), first, second]}
         workspaceId={WORKSPACE_ID}
         sessionId={SESSION_ID}
         isRunning={false}
@@ -1351,6 +1352,54 @@ describe("MessagesWithTurns live stream order", () => {
     expect(container.querySelector("strong")?.textContent).toBe("bold");
     expect(container.querySelector("code")?.textContent).toBe("code");
     expect(container.textContent).not.toContain("**bold**");
+  });
+
+  it("does not merge message count, tokens, or fork into a live MCP tool card", async () => {
+    useAppStore.setState({
+      completedTurns: {
+        [SESSION_ID]: [
+          {
+            id: "turn-live",
+            activities: [
+              {
+                toolUseId: "m1",
+                toolName: "mcp__fastctx__search",
+                inputJson: "{}",
+                resultText: "ok",
+                collapsed: true,
+                summary: "clock.json",
+                assistantMessageOrdinal: 0,
+              },
+            ],
+            messageCount: 9,
+            collapsed: true,
+            afterMessageIndex: 2,
+            durationMs: 120_000,
+            inputTokens: 373_300,
+            outputTokens: 1_000,
+          },
+        ],
+      },
+    });
+    const container = await render(
+      <MessagesWithTurns
+        messages={[
+          message("user-1", "User", "where is clock.json"),
+          message("assistant-1", "Assistant", "checking"),
+        ]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        onForkTurn={() => {}}
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("fastctx");
+    expect(text).not.toContain("9 messages");
+    expect(text).not.toContain("373.3k");
+    expect(container.querySelector('button[aria-label="Fork workspace"]')).toBeNull();
   });
 });
 

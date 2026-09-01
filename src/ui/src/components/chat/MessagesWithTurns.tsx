@@ -48,6 +48,7 @@ import { TurnSummary } from "./TurnSummary";
 import { ToolActivityRow } from "./ToolActivityRow";
 import { ToolActivitiesSection } from "./ToolActivitiesSection";
 import { TurnFooter } from "./TurnFooter";
+import { TaskProgressBar } from "./TaskProgressBar";
 import { TurnEditSummaryCard } from "./EditChangeSummary";
 import { summarizeTurnEdits } from "./editActivitySummary";
 import { PdfThumbnail } from "./PdfThumbnail";
@@ -339,6 +340,32 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
     > = {};
     const positions = new Set<number>();
 
+    let lastUserLocal = -1;
+    for (let idx = messages.length - 1; idx >= 0; idx--) {
+      if (messages[idx]?.role === "User") {
+        lastUserLocal = idx;
+        break;
+      }
+    }
+    const lastUserGlobal = lastUserLocal >= 0 ? globalOffset + lastUserLocal : -1;
+
+    const chromeTurnIdx = new Set<number>();
+    let i = completedTurns.length - 1;
+    while (i >= 0) {
+      const turn = completedTurns[i]!;
+      const inOpenTurn =
+        isRunning && lastUserGlobal >= 0 && turn.afterMessageIndex > lastUserGlobal;
+      if (!inOpenTurn) chromeTurnIdx.add(i);
+      const userIdx = findTriggeringUserIdx(turn.afterMessageIndex);
+      i -= 1;
+      while (
+        i >= 0 &&
+        findTriggeringUserIdx(completedTurns[i]!.afterMessageIndex) === userIdx
+      ) {
+        i -= 1;
+      }
+    }
+
     completedTurns.forEach((turn, globalIdx) => {
       const localAfter = turn.afterMessageIndex - globalOffset;
       const userIdx = findTriggeringUserIdx(turn.afterMessageIndex);
@@ -374,40 +401,28 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
         else activitiesByPosition.set(position, [activity]);
       }
 
-      let hasFinalGroup = false;
       for (const [position, activities] of activitiesByPosition) {
         positions.add(position);
         const displayGroups = groupToolActivitiesForDisplay(
           activities,
           toolDisplayMode,
         );
-        // The turn footer attaches to the last display group at the
-        // turn's final position — unless that group is a skill marker.
-        // Skills aren't tool calls; they render flat and flush, so the
-        // footer falls through to the standalone path (below) and stays
-        // at the bottom of the turn instead of landing above the marker.
-        let finalGroupIndex = -1;
-        if (position === turn.afterMessageIndex) {
-          const last = displayGroups.length - 1;
-          if (last >= 0 && displayGroups[last].kind !== "skill") {
-            finalGroupIndex = last;
-          }
-        }
-        hasFinalGroup ||= finalGroupIndex >= 0;
-        displayGroups.forEach((group, groupIndex) => {
+        displayGroups.forEach((group) => {
           (groupsByPosition[position] ??= []).push({
             turn,
             globalIdx,
             activities: group.activities,
             label: group.label,
             kind: group.kind,
-            showFooter: groupIndex === finalGroupIndex,
+            // Tool cards are tools only. Checkpoint / tokens / copy live on
+            // the standalone turn footer so they cannot merge into an MCP pill.
+            showFooter: false,
           });
         });
       }
 
       positions.add(turn.afterMessageIndex);
-      if (!hasFinalGroup) {
+      if (chromeTurnIdx.has(globalIdx)) {
         (finalFooterByPosition[turn.afterMessageIndex] ??= []).push({
           turn,
           globalIdx,
@@ -433,6 +448,7 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
     completedTurns,
     findTriggeringUserIdx,
     globalOffset,
+    isRunning,
     messages,
     toolDisplayMode,
   ]);
@@ -620,13 +636,25 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
   const renderPlainTurnFooter = (position: number) => {
     const data = plainTurnFootersByPosition.get(position);
     if (!data) return null;
+    // The in-progress user-turn must not grow checkpoint / token chrome
+    // under every assistant bubble while the agent is still running.
+    if (isRunning) {
+      let lastUser = -1;
+      for (let idx = messages.length - 1; idx >= 0; idx--) {
+        if (messages[idx]?.role === "User") {
+          lastUser = idx;
+          break;
+        }
+      }
+      if (data.userIdx === lastUser) return null;
+    }
     const rollbackData = buildRollbackData(data.userIdx);
     const onRollback =
       !isRunning && rollbackData
         ? () => openModal("rollback", rollbackData)
         : undefined;
     const onFork =
-      data.forkCheckpointId && onForkTurn
+      !isRunning && data.forkCheckpointId && onForkTurn
         ? () => onForkTurn(data.forkCheckpointId!)
         : undefined;
     const hasRenderableTokens =
@@ -832,10 +860,17 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
             );
           },
         )}
-        {footerEntries.map(({ turn }) => {
+        {footerEntries.map(({ turn, globalIdx }) => {
           const turnActivitySummary = editSummaryByTurnId.get(turn.id) ?? null;
+          const taskProgress = taskProgressByTurn.get(globalIdx);
           return (
             <React.Fragment key={`${turn.id}:${position}:footer`}>
+              {taskProgress && taskProgress.totalCount > 0 && (
+                <TaskProgressBar
+                  completedCount={taskProgress.completedCount}
+                  totalCount={taskProgress.totalCount}
+                />
+              )}
               {turnActivitySummary && (
                 <TurnEditSummaryCard
                   summary={turnActivitySummary}
@@ -849,7 +884,11 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
                 inputTokens={turn.inputTokens}
                 outputTokens={turn.outputTokens}
                 assistantText={assistantTextByTurnId.get(turn.id) || undefined}
-                onFork={onForkTurn ? () => onForkTurn(turn.id) : undefined}
+                onFork={
+                  !isRunning && onForkTurn
+                    ? () => onForkTurn(turn.id)
+                    : undefined
+                }
                 onRollback={buildOnRollback(turn.id)}
                 className={styles.messageTurnFooter}
               />
@@ -959,11 +998,16 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
           ) : null;
         const hideEmptyAssistantBubble =
           msg.role === "Assistant" && !msg.content;
+        const toolBlocks = (
+          <>
+            {renderTurns(globalOffset + idx)}
+            {renderLiveToolActivity(globalOffset + idx)}
+          </>
+        );
         return (
           <React.Fragment key={msg.id}>
             {assistantThinking}
-            {renderTurns(globalOffset + idx)}
-            {renderLiveToolActivity(globalOffset + idx)}
+            {msg.role === "User" ? toolBlocks : null}
             {hideEmptyAssistantBubble ? null : (
               <div
                 className={`${styles.message} ${styles[
@@ -1128,6 +1172,7 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
                 </div>
               </div>
             )}
+            {msg.role !== "User" ? toolBlocks : null}
             {conclusionsByMessage.has(msg.id) &&
               conclusionsByMessage
                 .get(msg.id)!
