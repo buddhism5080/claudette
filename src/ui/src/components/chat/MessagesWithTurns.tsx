@@ -47,11 +47,6 @@ import styles from "./ChatPanel.module.css";
 import { TurnSummary } from "./TurnSummary";
 import { ToolActivityRow } from "./ToolActivityRow";
 import { ToolActivitiesSection } from "./ToolActivitiesSection";
-import { LiveStreamingTimeline } from "./LiveStreamingTimeline";
-import {
-  timelineHasVisibleContent,
-  toolUseIdsInTimeline,
-} from "./streamingTimeline";
 import { TurnFooter } from "./TurnFooter";
 import { TurnEditSummaryCard } from "./EditChangeSummary";
 import { summarizeTurnEdits } from "./editActivitySummary";
@@ -73,7 +68,6 @@ import {
   EMPTY_CHECKPOINTS,
   EMPTY_COMPLETED_TURNS,
   EMPTY_CONCLUSIONS,
-  EMPTY_TIMELINE,
   type RollbackModalData,
 } from "./chatConstants";
 import { ConclusionCard } from "./ConclusionCard";
@@ -182,8 +176,8 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
   const liveToolActivities = useAppStore(
     (s) => s.toolActivities[sessionId] ?? EMPTY_ACTIVITIES,
   );
-  const streamingTimeline = useAppStore(
-    (s) => s.streamingTimeline[sessionId] ?? EMPTY_TIMELINE,
+  const liveAssistantMessageId = useAppStore(
+    (s) => s.liveAssistantMessageId[sessionId] ?? null,
   );
   const resolvedClaudeAuthFailureMessageId = useAppStore(
     (s) => s.resolvedClaudeAuthFailureMessageId,
@@ -869,10 +863,6 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
   const renderLiveToolActivity = (position: number) => {
     const activities = liveToolActivitiesByPosition.get(position);
     if (!activities) return null;
-    const leftover = timelineVisible
-      ? activities.filter((activity) => !timelineToolIds.has(activity.toolUseId))
-      : activities;
-    if (leftover.length === 0) return null;
     return (
       <ToolActivitiesSection
         key={`live-tool-activity-${position}`}
@@ -880,7 +870,7 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
         toolDisplayMode={toolDisplayMode}
         searchQuery={searchQuery}
         worktreePath={worktreePath}
-        activities={leftover}
+        activities={activities}
       />
     );
   };
@@ -890,33 +880,9 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
       !!pendingMessageId && messages.some((msg) => msg.id === pendingMessageId),
     [messages, pendingMessageId],
   );
-  const lastUserLocalIdx = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.role === "User") return i;
-    }
-    return -1;
-  }, [messages]);
-  const timelineVisible = timelineHasVisibleContent(streamingTimeline);
-  const timelineToolIds = useMemo(
-    () => toolUseIdsInTimeline(streamingTimeline),
-    [streamingTimeline],
-  );
 
   const renderStreamingTail = (position: number) => {
     if (position !== globalOffset + messages.length) return null;
-    if (timelineVisible) {
-      return (
-        <LiveStreamingTimeline
-          key={`streaming-tail-${position}`}
-          sessionId={sessionId}
-          workspaceId={workspaceId}
-          isStreaming={isRunning}
-          toolDisplayMode={toolDisplayMode}
-          searchQuery={searchQuery}
-          worktreePath={worktreePath}
-        />
-      );
-    }
     if (pendingMessageInWindow || (!streamingThinkingNode && !streamingMessageNode)) {
       return null;
     }
@@ -979,38 +945,26 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
         // Default rendering for User, Assistant, and non-sentinel System messages.
         // Assistant thinking is hoisted above tools at this position so API
         // order is preserved. Always mount when the message carries thinking —
-        // the Eye chip only controls default-expanded vs collapsed, it must
-        // not delete the block. While the live timeline is showing this turn,
-        // skip the persisted bubble (and its thinking) to avoid duplicates.
-        const pending = msg.id === pendingMessageId;
-        // Only the in-flight turn (assistant messages after the latest
-        // user prompt) is owned by the live timeline. Hiding every
-        // Assistant bubble while `isRunning` made prior replies vanish
-        // as soon as a follow-up was sent, leaving only tool pills.
-        const liveTimelineOwnsTurn =
-          isRunning &&
-          timelineVisible &&
-          msg.role === "Assistant" &&
-          lastUserLocalIdx >= 0 &&
-          idx > lastUserLocalIdx;
+        // the Eye chip only controls default-expanded vs collapsed.
+        const liveId = liveAssistantMessageId;
         const assistantThinking =
-          !liveTimelineOwnsTurn && msg.role === "Assistant" && msg.thinking ? (
+          msg.role === "Assistant" && msg.thinking ? (
             <ThinkingBlock
               content={msg.thinking}
-              isStreaming={pending}
-              defaultExpanded={showThinkingBlocks}
+              isStreaming={isRunning && liveId === msg.id}
+              defaultExpanded={showThinkingBlocks || (isRunning && liveId === msg.id)}
               inline={toolDisplayMode === "inline"}
               searchQuery={searchQuery}
             />
           ) : null;
+        const hideEmptyAssistantBubble =
+          msg.role === "Assistant" && !msg.content;
         return (
           <React.Fragment key={msg.id}>
             {assistantThinking}
             {renderTurns(globalOffset + idx)}
             {renderLiveToolActivity(globalOffset + idx)}
-            {liveTimelineOwnsTurn || pending ? (
-              liveTimelineOwnsTurn ? null : streamingMessageNode
-            ) : (
+            {hideEmptyAssistantBubble ? null : (
               <div
                 className={`${styles.message} ${styles[
                   roleClassKey(msg.role, msg.content, {

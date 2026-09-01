@@ -34,8 +34,6 @@ import { ScrollContext } from "./ScrollContext";
 import { ScrollToBottomPill } from "./ScrollToBottomPill";
 import { WorkflowStatusPill } from "./WorkflowStatusPill";
 import { SetupScriptBanner } from "./SetupScriptBanner";
-import { StreamingMessage } from "./StreamingMessage";
-import { StreamingThinkingBlock } from "./StreamingThinkingBlock";
 import { formatElapsedSeconds } from "./chatHelpers";
 import { extractMentionPaths } from "./queuedMessageEditing";
 import { usePendingChatPrompt } from "./usePendingChatPrompt";
@@ -136,9 +134,9 @@ export function ChatPanelSessionView({
   elapsed,
   error,
   globalOffset,
-  hasPendingTypewriter,
+  hasPendingTypewriter: _hasPendingTypewriter,
   hasStreaming,
-  hasThinking,
+  hasThinking: _hasThinking,
   historyIndexRef,
   historyRef,
   isAtBottom,
@@ -177,7 +175,7 @@ export function ChatPanelSessionView({
   setError,
   setQueuedMessageEditing,
   showChatAuthLoginPanel,
-  showThinkingBlocks,
+  showThinkingBlocks: _showThinkingBlocks,
   steerQueuedTooltip,
   toolDisplayMode,
   updateQueuedMessage,
@@ -267,26 +265,6 @@ export function ChatPanelSessionView({
                     liveTaskProgressNode={
                       activitiesCount > 0 ? (
                         <CurrentTurnTaskProgress sessionId={activeSessionId} />
-                      ) : null
-                    }
-                    streamingThinkingNode={
-                      hasThinking && showThinkingBlocks ? (
-                        <StreamingThinkingBlock
-                          sessionId={activeSessionId}
-                          isStreaming={isRunning ?? false}
-                          inline={toolDisplayMode === "inline"}
-                          searchQuery={searchQuery}
-                        />
-                      ) : null
-                    }
-                    streamingMessageNode={
-                      hasStreaming || hasPendingTypewriter ? (
-                        <StreamingMessage
-                          sessionId={activeSessionId}
-                          workspaceId={selectedWorkspaceId}
-                          isStreaming={isRunning ?? false}
-                          searchQuery={searchQuery}
-                        />
                       ) : null
                     }
                   />

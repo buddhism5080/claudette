@@ -347,6 +347,8 @@ export function useAgentStream() {
     (s) => s.appendStreamingTimelineDelta,
   );
   const clearStreamingTimeline = useAppStore((s) => s.clearStreamingTimeline);
+  const appendLiveAssistantPart = useAppStore((s) => s.appendLiveAssistantPart);
+  const sealLiveAssistantMessage = useAppStore((s) => s.sealLiveAssistantMessage);
   const addChatMessage = useAppStore((s) => s.addChatMessage);
   const addToolActivity = useAppStore((s) => s.addToolActivity);
   const updateToolActivity = useAppStore((s) => s.updateToolActivity);
@@ -701,6 +703,10 @@ export function useAgentStream() {
                   if ("type" in delta && delta.type === "text_delta") {
                     appendStreamingContent(sessionId, delta.text);
                     appendStreamingTimelineDelta(sessionId, "text", delta.text);
+                    appendLiveAssistantPart(sessionId, wsId, {
+                      type: "text",
+                      text: delta.text,
+                    });
                   }
                   if (
                     "type" in delta &&
@@ -750,6 +756,10 @@ export function useAgentStream() {
                       "thinking",
                       delta.thinking,
                     );
+                    appendLiveAssistantPart(sessionId, wsId, {
+                      type: "thinking",
+                      text: delta.thinking,
+                    });
                   }
                   break;
                 }
@@ -801,6 +811,19 @@ export function useAgentStream() {
                       id: inner.content_block.id,
                       toolUseId: inner.content_block.id,
                     });
+                    sealLiveAssistantMessage(sessionId);
+                    const liveMsgs =
+                      useAppStore.getState().chatMessages[sessionId] || [];
+                    let lastUser = -1;
+                    for (let i = liveMsgs.length - 1; i >= 0; i--) {
+                      if (liveMsgs[i]?.role === "User") {
+                        lastUser = i;
+                        break;
+                      }
+                    }
+                    const assistantCount = liveMsgs
+                      .slice(lastUser + 1)
+                      .filter((m) => m.role === "Assistant").length;
                     addToolActivity(sessionId, {
                       toolUseId: inner.content_block.id,
                       toolName: inner.content_block.name,
@@ -811,12 +834,7 @@ export function useAgentStream() {
                         ? extractToolSummary(inner.content_block.name, inputJson)
                         : "",
                       startedAt: new Date().toISOString(),
-                      assistantMessageOrdinal:
-                        (turnMessageCountRef.current[sessionId] || 0) +
-                        ((useAppStore.getState().streamingContent[sessionId] || "")
-                          .trim().length > 0
-                          ? 1
-                          : 0),
+                      assistantMessageOrdinal: Math.max(0, assistantCount - 1),
                     });
                     // Detect plan mode changes from agent tool calls. Persist
                     // alongside the in-memory update so an agent-driven
@@ -876,54 +894,45 @@ export function useAgentStream() {
             break;
           }
           case "assistant": {
-            // Full message received — it's already persisted by the backend.
-            // The CLI may fire multiple assistant events per turn: one with
-            // thinking blocks only (no text), then one with text. We only
-            // add a message and clear thinking when we have actual text.
+            // Deltas already upserted the visible ChatMessage. Do not add a
+            // second bubble or hide the one the user is looking at.
             const { text, thinking } = extractAssistantMessageParts(
               streamEvent.message.content,
             );
             if (text) {
               turnMessageCountRef.current[sessionId] =
                 (turnMessageCountRef.current[sessionId] || 0) + 1;
-              debugChat("stream", "assistant", {
-                sessionId,
-                textLength: text.length,
-                turnMessageCount: turnMessageCountRef.current[sessionId],
-              });
-              const messageId = crypto.randomUUID();
-              // Latch the final text for the typewriter so StreamingMessage
-              // can keep draining after streamingContent clears. The matching
-              // messageId tells MessagesWithTurns to hide the just-added
-              // completed message until drain finishes.
-              setPendingTypewriter(sessionId, messageId, text);
-              addChatMessage(sessionId, {
-                id: messageId,
-                workspace_id: wsId,
-                chat_session_id: sessionId,
-                role: "Assistant",
-                content: text,
-                cost_usd: null,
-                duration_ms: null,
-                created_at: new Date().toISOString(),
-                thinking:
-                  useAppStore.getState().streamingThinking[sessionId] ||
-                  thinkingFromTimeline(
-                    useAppStore.getState().streamingTimeline[sessionId] || [],
-                  ) ||
-                  thinking ||
-                  null,
-                input_tokens: null,
-                output_tokens: null,
-                cache_read_tokens: null,
-                cache_creation_tokens: null,
-              });
-              // Next thinking round starts empty; the timeline still holds
-              // the frozen blocks for live rendering until the turn ends.
+              const msgs =
+                useAppStore.getState().chatMessages[sessionId] || [];
+              const already = msgs.some(
+                (m) => m.role === "Assistant" && m.content === text,
+              );
+              if (!already) {
+                addChatMessage(sessionId, {
+                  id: crypto.randomUUID(),
+                  workspace_id: wsId,
+                  chat_session_id: sessionId,
+                  role: "Assistant",
+                  content: text,
+                  cost_usd: null,
+                  duration_ms: null,
+                  created_at: new Date().toISOString(),
+                  thinking:
+                    useAppStore.getState().streamingThinking[sessionId] ||
+                    thinking ||
+                    null,
+                  input_tokens: null,
+                  output_tokens: null,
+                  cache_read_tokens: null,
+                  cache_creation_tokens: null,
+                });
+              }
               clearStreamingThinking(sessionId);
-              // streamingTimeline is NOT cleared here — wiping it on the
-              // typewriter drain hid thinking as soon as the first text
-              // arrived while tools were still running.
+            } else if (thinking) {
+              appendLiveAssistantPart(sessionId, wsId, {
+                type: "thinking",
+                text: thinking,
+              });
             }
             setStreamingContent(sessionId, "");
             break;
@@ -962,6 +971,7 @@ export function useAgentStream() {
             useAppStore.getState().markWorkspaceAsUnread(wsId);
             clearStreamingTimeline(sessionId);
             clearStreamingThinking(sessionId);
+            sealLiveAssistantMessage(sessionId);
             break;
           }
           case "user": {
@@ -1010,6 +1020,8 @@ export function useAgentStream() {
     startStreamingTimelineBlock,
     appendStreamingTimelineDelta,
     clearStreamingTimeline,
+    appendLiveAssistantPart,
+    sealLiveAssistantMessage,
     addChatMessage,
     setPendingTypewriter,
     addToolActivity,

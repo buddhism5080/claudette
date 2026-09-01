@@ -1002,25 +1002,13 @@ describe("MessagesWithTurns workflow groups", () => {
 
 describe("MessagesWithTurns live stream order", () => {
   it("renders thinking, tool, then more thinking in API arrival order during a live turn", async () => {
+    const first = message("asst-1", "Assistant", "");
+    first.thinking = "I will read the file first.";
+    const second = message("asst-2", "Assistant", "");
+    second.thinking = "Now I can patch it.";
     useAppStore.setState({
-      showThinkingBlocks: { [SESSION_ID]: false },
-      streamingTimeline: {
-        [SESSION_ID]: [
-          {
-            type: "thinking",
-            id: "th-0",
-            content: "I will read the file first.",
-            active: false,
-          },
-          { type: "tool", id: "read-1", toolUseId: "read-1" },
-          {
-            type: "thinking",
-            id: "th-1",
-            content: "Now I can patch it.",
-            active: true,
-          },
-        ],
-      },
+      showThinkingBlocks: { [SESSION_ID]: true },
+      liveAssistantMessageId: { [SESSION_ID]: "asst-2" },
       toolActivities: {
         [SESSION_ID]: [
           {
@@ -1030,6 +1018,7 @@ describe("MessagesWithTurns live stream order", () => {
             resultText: "",
             collapsed: true,
             summary: "src/app.ts",
+            assistantMessageOrdinal: 0,
           },
         ],
       },
@@ -1037,7 +1026,7 @@ describe("MessagesWithTurns live stream order", () => {
 
     const container = await render(
       <MessagesWithTurns
-        messages={[message("user-1", "User", "Fix the bug")]}
+        messages={[message("user-1", "User", "Fix the bug"), first, second]}
         workspaceId={WORKSPACE_ID}
         sessionId={SESSION_ID}
         isRunning
@@ -1049,18 +1038,10 @@ describe("MessagesWithTurns live stream order", () => {
     const text = container.textContent ?? "";
     const firstThought = text.indexOf("I will read the file first.");
     const tool = text.indexOf("Read");
+    const secondThought = text.indexOf("Now I can patch it.");
     expect(firstThought).toBeGreaterThan(-1);
     expect(tool).toBeGreaterThan(firstThought);
-    // The later thinking block is still streaming (typewriter), so assert the
-    // live timeline kept it after the tool rather than requiring full text.
-    const timeline = container.querySelector(
-      "[data-testid=live-streaming-timeline]",
-    );
-    expect(timeline).not.toBeNull();
-    const thinkingLabels = Array.from(
-      timeline!.querySelectorAll("span"),
-    ).filter((el) => (el.textContent ?? "").includes("Thinking"));
-    expect(thinkingLabels.length).toBeGreaterThanOrEqual(2);
+    expect(secondThought).toBeGreaterThan(tool);
   });
 
   it("shows persisted assistant thinking before ordinal-0 tools, then the answer text", async () => {
@@ -1113,13 +1094,6 @@ describe("MessagesWithTurns live stream order", () => {
 
   it("merges consecutive live tools into one grouped pill", async () => {
     useAppStore.setState({
-      streamingTimeline: {
-        [SESSION_ID]: [
-          { type: "tool", id: "read-1", toolUseId: "read-1" },
-          { type: "tool", id: "bash-1", toolUseId: "bash-1" },
-          { type: "tool", id: "glob-1", toolUseId: "glob-1" },
-        ],
-      },
       toolActivities: {
         [SESSION_ID]: [
           {
@@ -1168,12 +1142,6 @@ describe("MessagesWithTurns live stream order", () => {
 
   it("merges consecutive live calls to the same MCP server", async () => {
     useAppStore.setState({
-      streamingTimeline: {
-        [SESSION_ID]: [
-          { type: "tool", id: "q1", toolUseId: "q1" },
-          { type: "tool", id: "q2", toolUseId: "q2" },
-        ],
-      },
       toolActivities: {
         [SESSION_ID]: [
           {
@@ -1311,17 +1279,6 @@ describe("MessagesWithTurns live stream order", () => {
           },
         ],
       },
-      streamingTimeline: {
-        [SESSION_ID]: [
-          {
-            type: "thinking",
-            id: "th-new",
-            content: "planning the follow-up",
-            active: true,
-          },
-          { type: "tool", id: "read-new", toolUseId: "read-new" },
-        ],
-      },
       toolActivities: {
         [SESSION_ID]: [
           {
@@ -1379,22 +1336,10 @@ describe("MessagesWithTurns live stream order", () => {
   });
 
   it("renders live stream text as markdown, not raw source", async () => {
-    useAppStore.setState({
-      streamingTimeline: {
-        [SESSION_ID]: [
-          {
-            type: "text",
-            id: "tx-0",
-            content: "Use **bold** and `code`.",
-            active: true,
-          },
-        ],
-      },
-    });
-
+    const assistant = message("assistant-1", "Assistant", "Use **bold** and `code`.");
     const container = await render(
       <MessagesWithTurns
-        messages={[message("user-1", "User", "format this")]}
+        messages={[message("user-1", "User", "format this"), assistant]}
         workspaceId={WORKSPACE_ID}
         sessionId={SESSION_ID}
         isRunning
@@ -1403,11 +1348,9 @@ describe("MessagesWithTurns live stream order", () => {
       />,
     );
 
-    const live = container.querySelector("[data-testid=live-stream-text]");
-    expect(live).not.toBeNull();
-    expect(live?.querySelector("strong")?.textContent).toBe("bold");
-    expect(live?.querySelector("code")?.textContent).toBe("code");
-    expect(live?.textContent).not.toContain("**bold**");
+    expect(container.querySelector("strong")?.textContent).toBe("bold");
+    expect(container.querySelector("code")?.textContent).toBe("code");
+    expect(container.textContent).not.toContain("**bold**");
   });
 });
 

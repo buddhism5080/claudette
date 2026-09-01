@@ -312,6 +312,51 @@ describe("streamingThinking (per-workspace)", () => {
   });
 });
 
+describe("appendLiveAssistantPart", () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      chatMessages: {},
+      liveAssistantMessageId: {},
+      lastMessages: {},
+    });
+  });
+
+  it("creates then grows a single assistant message from thinking and text", () => {
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "thinking",
+      text: "plan ",
+    });
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "thinking",
+      text: "the edit",
+    });
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "text",
+      text: "Done.",
+    });
+    const msgs = useAppStore.getState().chatMessages[WS_ID] ?? [];
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]?.thinking).toBe("plan the edit");
+    expect(msgs[0]?.content).toBe("Done.");
+  });
+
+  it("starts a new message after seal (tool boundary)", () => {
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "thinking",
+      text: "first",
+    });
+    useAppStore.getState().sealLiveAssistantMessage(WS_ID);
+    useAppStore.getState().appendLiveAssistantPart(WS_ID, "ws-1", {
+      type: "text",
+      text: "after tools",
+    });
+    const msgs = useAppStore.getState().chatMessages[WS_ID] ?? [];
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0]?.thinking).toBe("first");
+    expect(msgs[1]?.content).toBe("after tools");
+  });
+});
+
 describe("finishTypewriterDrain (per-workspace)", () => {
   beforeEach(() => {
     useAppStore.setState({ pendingTypewriter: {}, streamingThinking: {} });

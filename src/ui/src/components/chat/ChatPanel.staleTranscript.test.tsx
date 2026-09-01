@@ -355,7 +355,7 @@ describe("ChatPanel transcript session switches", () => {
     });
 
     expect(container?.textContent).not.toContain("old transcript should disappear");
-    expect(container?.textContent).toContain(`streaming:${NEW_SESSION}`);
+    expect(container?.textContent).not.toContain("Send a message to start a conversation");
   });
 
   it("renders an empty new chat without the previous session transcript", async () => {

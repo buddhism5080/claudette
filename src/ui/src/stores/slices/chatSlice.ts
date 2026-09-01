@@ -214,6 +214,13 @@ export interface ChatSlice {
     text: string,
   ) => void;
   clearStreamingTimeline: (sessionId: string) => void;
+  liveAssistantMessageId: Record<string, string | null>;
+  appendLiveAssistantPart: (
+    sessionId: string,
+    workspaceId: string,
+    part: { type: "thinking" | "text"; text: string },
+  ) => void;
+  sealLiveAssistantMessage: (sessionId: string) => void;
   setShowThinkingBlocks: (sessionId: string, show: boolean) => void;
   setToolActivities: (sessionId: string, activities: ToolActivity[]) => void;
   addToolActivity: (sessionId: string, activity: ToolActivity) => void;
@@ -367,6 +374,7 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
   streamingContent: {},
   streamingThinking: {},
   streamingTimeline: {},
+  liveAssistantMessageId: {},
   pendingTypewriter: {},
   showThinkingBlocks: {},
   toolActivities: {},
@@ -509,6 +517,69 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
     set((s) => ({
       streamingTimeline: { ...s.streamingTimeline, [sessionId]: [] },
     })),
+  appendLiveAssistantPart: (sessionId, workspaceId, part) =>
+    set((s) => {
+      if (!part.text) return s;
+      const msgs = s.chatMessages[sessionId] || [];
+      const liveId = s.liveAssistantMessageId[sessionId];
+      const liveIdx = liveId
+        ? msgs.findIndex((msg) => msg.id === liveId)
+        : -1;
+      if (liveIdx >= 0) {
+        const msg = msgs[liveIdx]!;
+        const updated = {
+          ...msg,
+          thinking:
+            part.type === "thinking"
+              ? (msg.thinking || "") + part.text
+              : msg.thinking,
+          content:
+            part.type === "text" ? msg.content + part.text : msg.content,
+        };
+        const nextMsgs = msgs.map((item, idx) =>
+          idx === liveIdx ? updated : item,
+        );
+        return {
+          chatMessages: { ...s.chatMessages, [sessionId]: nextMsgs },
+          lastMessages: { ...s.lastMessages, [sessionId]: updated },
+        };
+      }
+      const id = crypto.randomUUID();
+      const created: ChatMessage = {
+        id,
+        workspace_id: workspaceId,
+        chat_session_id: sessionId,
+        role: "Assistant",
+        content: part.type === "text" ? part.text : "",
+        cost_usd: null,
+        duration_ms: null,
+        created_at: new Date().toISOString(),
+        thinking: part.type === "thinking" ? part.text : null,
+        input_tokens: null,
+        output_tokens: null,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+      };
+      const nextMsgs = [...msgs, created];
+      return {
+        chatMessages: { ...s.chatMessages, [sessionId]: nextMsgs },
+        lastMessages: { ...s.lastMessages, [sessionId]: created },
+        liveAssistantMessageId: {
+          ...s.liveAssistantMessageId,
+          [sessionId]: id,
+        },
+      };
+    }),
+  sealLiveAssistantMessage: (sessionId) =>
+    set((s) => {
+      if (!s.liveAssistantMessageId[sessionId]) return s;
+      return {
+        liveAssistantMessageId: {
+          ...s.liveAssistantMessageId,
+          [sessionId]: null,
+        },
+      };
+    }),
   setShowThinkingBlocks: (sessionId, show) =>
     set((s) => ({
       showThinkingBlocks: { ...s.showThinkingBlocks, [sessionId]: show },
