@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
 use claudette::agent::{self, AgentSession};
-use claudette::chat::{CheckpointArgs, create_turn_checkpoint_unless_present};
+use claudette::chat::{CheckpointArgs, create_turn_checkpoint_for_open_turn};
 use claudette::db::Database;
 use claudette::model::{ChatMessage, ChatRole};
 
@@ -113,8 +113,9 @@ pub async fn stop_agent(
     crate::tray::rebuild_tray(&app);
 
     // Checkpoint the last live row BEFORE inserting "Agent stopped" so
-    // tools hydrate above that system message. ProcessExited may also
-    // try; unless_present de-dupes.
+    // tools hydrate above that system message. First completed tool may
+    // already have opened this turn's checkpoint on an earlier thinking
+    // row; for_open_turn de-dupes.
     if let Some(anchor) = db
         .last_chat_message_id_for_session(&chat_session_id)
         .ok()
@@ -126,7 +127,13 @@ pub async fn stop_agent(
             .find(|w| w.id == workspace_id)
             .and_then(|w| w.worktree_path.clone())
             .unwrap_or_default();
-        if let Some(cp) = create_turn_checkpoint_unless_present(CheckpointArgs {
+        let turn_user = db
+            .last_user_message_id_for_session(&chat_session_id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| anchor.clone());
+        if let Some(cp) = create_turn_checkpoint_for_open_turn(
+            CheckpointArgs {
             db_path: &state.db_path,
             workspace_id: &workspace_id,
             chat_session_id: &chat_session_id,
@@ -134,7 +141,9 @@ pub async fn stop_agent(
             worktree_path: &wt,
             created_at: now_iso(),
             claude_session_id: ended_sid.as_deref().filter(|s| !s.is_empty()),
-        })
+        },
+            &turn_user,
+        )
         .await
         {
             let payload = serde_json::json!({

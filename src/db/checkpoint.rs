@@ -16,6 +16,60 @@ use crate::model::{
 
 use super::{Database, retry_on_busy};
 
+const UPSERT_TURN_TOOL_ACTIVITY_SQL: &str = "
+INSERT INTO turn_tool_activities (
+    id, checkpoint_id, tool_use_id, tool_name, input_json,
+    result_text, summary, sort_order, assistant_message_ordinal,
+    agent_task_id, agent_description, agent_last_tool_name,
+    agent_tool_use_count, agent_status, agent_tool_calls_json,
+    agent_thinking_blocks_json, agent_result_text, workflow_progress_json
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+ON CONFLICT(checkpoint_id, tool_use_id) DO UPDATE SET
+    tool_name = excluded.tool_name,
+    input_json = excluded.input_json,
+    result_text = excluded.result_text,
+    summary = excluded.summary,
+    sort_order = excluded.sort_order,
+    assistant_message_ordinal = excluded.assistant_message_ordinal,
+    agent_task_id = excluded.agent_task_id,
+    agent_description = excluded.agent_description,
+    agent_last_tool_name = excluded.agent_last_tool_name,
+    agent_tool_use_count = excluded.agent_tool_use_count,
+    agent_status = excluded.agent_status,
+    agent_tool_calls_json = excluded.agent_tool_calls_json,
+    agent_thinking_blocks_json = excluded.agent_thinking_blocks_json,
+    agent_result_text = excluded.agent_result_text,
+    workflow_progress_json = excluded.workflow_progress_json
+";
+
+fn bind_turn_tool_activity(
+    stmt: &mut rusqlite::Statement<'_>,
+    a: &TurnToolActivity,
+) -> Result<(), rusqlite::Error> {
+    stmt.execute(params![
+        a.id,
+        a.checkpoint_id,
+        a.tool_use_id,
+        a.tool_name,
+        a.input_json,
+        a.result_text,
+        a.summary,
+        a.sort_order,
+        a.assistant_message_ordinal,
+        a.agent_task_id,
+        a.agent_description,
+        a.agent_last_tool_name,
+        a.agent_tool_use_count,
+        a.agent_status,
+        a.agent_tool_calls_json,
+        a.agent_thinking_blocks_json,
+        a.agent_result_text,
+        a.workflow_progress_json,
+    ])?;
+    Ok(())
+}
+
 /// Outcome of [`Database::finish_workflow_activity`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowActivityResolution {
@@ -139,6 +193,58 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(n > 0)
+    }
+
+    /// True when this session already has a checkpoint anchored on `message_id`
+    /// or on any later message in the same session (rowid/created_at). First
+    /// completed tool opens the turn checkpoint on an early thinking row;
+    /// Result/Stop must not mint a second restore point on a later text row.
+    pub fn session_has_checkpoint_on_or_after_message(
+        &self,
+        chat_session_id: &str,
+        message_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let n: i64 = self.conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM conversation_checkpoints cp
+                  JOIN chat_messages anchor ON anchor.id = ?2
+                  JOIN chat_messages cp_msg ON cp_msg.id = cp.message_id
+                 WHERE cp.chat_session_id = ?1
+                   AND cp_msg.chat_session_id = ?1
+                   AND (cp_msg.created_at, cp_msg.rowid)
+                     >= (anchor.created_at, anchor.rowid)
+             )",
+            params![chat_session_id, message_id],
+            |row| row.get(0),
+        )?;
+        Ok(n != 0)
+    }
+
+    /// Latest checkpoint for this session whose anchor is `message_id` or a
+    /// later row. Used to attach completed tools after the turn already opened
+    /// a checkpoint on an earlier thinking block.
+    pub fn latest_checkpoint_id_on_or_after_message(
+        &self,
+        chat_session_id: &str,
+        message_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT cp.id
+                   FROM conversation_checkpoints cp
+                   JOIN chat_messages anchor ON anchor.id = ?2
+                   JOIN chat_messages cp_msg ON cp_msg.id = cp.message_id
+                  WHERE cp.chat_session_id = ?1
+                    AND cp_msg.chat_session_id = ?1
+                    AND (cp_msg.created_at, cp_msg.rowid)
+                      >= (anchor.created_at, anchor.rowid)
+                  ORDER BY cp.turn_index DESC, cp.rowid DESC
+                  LIMIT 1",
+                params![chat_session_id, message_id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     /// Delete checkpoints for a session after a given turn index. Used for
@@ -878,37 +984,9 @@ impl Database {
     ) -> Result<(), rusqlite::Error> {
         let tx = self.conn.unchecked_transaction()?;
         {
-            let mut stmt = tx.prepare(
-                "INSERT INTO turn_tool_activities (
-                    id, checkpoint_id, tool_use_id, tool_name, input_json,
-                    result_text, summary, sort_order, assistant_message_ordinal,
-                    agent_task_id, agent_description, agent_last_tool_name,
-                    agent_tool_use_count, agent_status, agent_tool_calls_json,
-                    agent_thinking_blocks_json, agent_result_text, workflow_progress_json
-                 )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-            )?;
+            let mut stmt = tx.prepare(UPSERT_TURN_TOOL_ACTIVITY_SQL)?;
             for a in activities {
-                stmt.execute(params![
-                    a.id,
-                    a.checkpoint_id,
-                    a.tool_use_id,
-                    a.tool_name,
-                    a.input_json,
-                    a.result_text,
-                    a.summary,
-                    a.sort_order,
-                    a.assistant_message_ordinal,
-                    a.agent_task_id,
-                    a.agent_description,
-                    a.agent_last_tool_name,
-                    a.agent_tool_use_count,
-                    a.agent_status,
-                    a.agent_tool_calls_json,
-                    a.agent_thinking_blocks_json,
-                    a.agent_result_text,
-                    a.workflow_progress_json,
-                ])?;
+                bind_turn_tool_activity(&mut stmt, a)?;
             }
         }
         tx.commit()?;
@@ -940,41 +1018,22 @@ impl Database {
             params![message_count, checkpoint_id],
         )?;
         {
-            let mut stmt = tx.prepare(
-                "INSERT INTO turn_tool_activities (
-                    id, checkpoint_id, tool_use_id, tool_name, input_json,
-                    result_text, summary, sort_order, assistant_message_ordinal,
-                    agent_task_id, agent_description, agent_last_tool_name,
-                    agent_tool_use_count, agent_status, agent_tool_calls_json,
-                    agent_thinking_blocks_json, agent_result_text, workflow_progress_json
-                 )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-            )?;
+            let mut stmt = tx.prepare(UPSERT_TURN_TOOL_ACTIVITY_SQL)?;
             for a in activities {
-                stmt.execute(params![
-                    a.id,
-                    a.checkpoint_id,
-                    a.tool_use_id,
-                    a.tool_name,
-                    a.input_json,
-                    a.result_text,
-                    a.summary,
-                    a.sort_order,
-                    a.assistant_message_ordinal,
-                    a.agent_task_id,
-                    a.agent_description,
-                    a.agent_last_tool_name,
-                    a.agent_tool_use_count,
-                    a.agent_status,
-                    a.agent_tool_calls_json,
-                    a.agent_thinking_blocks_json,
-                    a.agent_result_text,
-                    a.workflow_progress_json,
-                ])?;
+                bind_turn_tool_activity(&mut stmt, a)?;
             }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Persist one completed tool as soon as its result arrives. Same
+    /// (checkpoint, tool_use) pair can be dumped again at turn end.
+    pub fn upsert_turn_tool_activity(
+        &self,
+        activity: &TurnToolActivity,
+    ) -> Result<(), rusqlite::Error> {
+        self.insert_turn_tool_activities(std::slice::from_ref(activity))
     }
 
     /// Update the persisted workflow progress tree (and agent status) for a
@@ -1763,6 +1822,71 @@ mod tests {
     }
 
     #[test]
+    fn session_has_checkpoint_on_or_after_user_message_covers_later_assistant_anchor() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "u1", "w1", ChatRole::User, "prompt"))
+            .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "a1", "w1", ChatRole::Assistant, "think"))
+            .unwrap();
+        let sid = db
+            .default_session_id_for_workspace("w1")
+            .unwrap()
+            .expect("default session");
+        assert!(!db
+            .session_has_checkpoint_on_or_after_message(&sid, "u1")
+            .unwrap());
+        db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "a1", 0))
+            .unwrap();
+        assert!(db
+            .session_has_checkpoint_on_or_after_message(&sid, "u1")
+            .unwrap());
+        assert_eq!(
+            db.latest_checkpoint_id_on_or_after_message(&sid, "u1")
+                .unwrap()
+                .as_deref(),
+            Some("cp1")
+        );
+    }
+
+    #[test]
+    fn upsert_turn_tool_activity_inserts_then_updates_result() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+            .unwrap();
+        db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
+            .unwrap();
+        let mut activity = make_tool_activity("a1", "cp1", "Read", 0);
+        activity.result_text = String::new();
+        db.upsert_turn_tool_activity(&activity).unwrap();
+        activity.result_text = "file contents".into();
+        db.upsert_turn_tool_activity(&activity).unwrap();
+        let turns = db.list_completed_turns("w1").unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].activities.len(), 1);
+        assert_eq!(turns[0].activities[0].tool_name, "Read");
+        assert_eq!(turns[0].activities[0].result_text, "file contents");
+    }
+
+    #[test]
+    fn save_turn_tool_activities_second_dump_does_not_duplicate() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+            .unwrap();
+        db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
+            .unwrap();
+        let first = make_tool_activity("row-1", "cp1", "Read", 0);
+        db.save_turn_tool_activities("cp1", 1, &[first]).unwrap();
+        let mut second = make_tool_activity("row-2", "cp1", "Read", 0);
+        second.tool_use_id = "tu_row-1".into();
+        second.result_text = "updated".into();
+        db.save_turn_tool_activities("cp1", 2, &[second]).unwrap();
+        let turns = db.list_completed_turns("w1").unwrap();
+        assert_eq!(turns[0].activities.len(), 1);
+        assert_eq!(turns[0].activities[0].result_text, "updated");
+        assert_eq!(turns[0].message_count, 2);
+    }
+
+    #[test]
     fn test_insert_and_list_tool_activities() {
         let db = setup_db_with_workspace();
         db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
@@ -2214,13 +2338,10 @@ mod tests {
         );
     }
 
-    /// `tool_use_id` has no unique index, so the terminal write carries the
-    /// same `tool_name = 'Workflow'` predicate as the read that precedes it.
-    /// Without it a duplicate id shared with another tool's row would be
-    /// rewritten too, contradicting what this method documents about its own
-    /// scope.
+    /// Duplicate `(checkpoint_id, tool_use_id)` used to be legal; live persist
+    /// upserts on that pair so a stream write and a later dump share one row.
     #[test]
-    fn test_finish_workflow_activity_update_is_scoped_to_workflow_rows() {
+    fn insert_turn_tool_activities_upserts_same_checkpoint_tool_use() {
         let db = setup_db_with_workspace();
         db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
             .unwrap();
@@ -2229,10 +2350,34 @@ mod tests {
 
         let mut wf = make_tool_activity("a1", "cp1", "Workflow", 0);
         wf.agent_status = Some("running".into());
-        // Same `tool_use_id`, different tool. Contrived — ids from the API are
-        // unique in practice — but nothing in the schema prevents it, and the
-        // write must not depend on that holding.
         let mut collided = make_tool_activity("a2", "cp1", "Bash", 1);
+        collided.tool_use_id = "tu_a1".into();
+        collided.agent_status = Some("running".into());
+        db.insert_turn_tool_activities(&[wf, collided]).unwrap();
+
+        let turns = db.list_completed_turns("w1").unwrap();
+        assert_eq!(turns[0].activities.len(), 1);
+        assert_eq!(turns[0].activities[0].tool_name, "Bash");
+    }
+
+    /// `tool_use_id` is unique per checkpoint, not globally. Fork copies keep
+    /// the id on a different checkpoint; the terminal write still requires
+    /// `tool_name = 'Workflow'` so a Bash row sharing the id is left alone.
+    #[test]
+    fn test_finish_workflow_activity_update_is_scoped_to_workflow_rows() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+            .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "m2", "w1", ChatRole::Assistant, "a2"))
+            .unwrap();
+        db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
+            .unwrap();
+        db.insert_checkpoint(&make_checkpoint(&db, "cp2", "w1", "m2", 1))
+            .unwrap();
+
+        let mut wf = make_tool_activity("a1", "cp1", "Workflow", 0);
+        wf.agent_status = Some("running".into());
+        let mut collided = make_tool_activity("a2", "cp2", "Bash", 0);
         collided.tool_use_id = "tu_a1".into();
         collided.agent_status = Some("running".into());
         db.insert_turn_tool_activities(&[wf, collided]).unwrap();
@@ -2252,8 +2397,11 @@ mod tests {
         );
 
         let turns = db.list_completed_turns("w1").unwrap();
-        let by_tool = |tool: &str| {
-            turns[0]
+        let status_of = |cp: &str, tool: &str| {
+            turns
+                .iter()
+                .find(|t| t.checkpoint_id == cp)
+                .unwrap()
                 .activities
                 .iter()
                 .find(|a| a.tool_name == tool)
@@ -2261,9 +2409,9 @@ mod tests {
                 .agent_status
                 .clone()
         };
-        assert_eq!(by_tool("Workflow").as_deref(), Some("completed"));
+        assert_eq!(status_of("cp1", "Workflow").as_deref(), Some("completed"));
         assert_eq!(
-            by_tool("Bash").as_deref(),
+            status_of("cp2", "Bash").as_deref(),
             Some("running"),
             "the colliding non-Workflow row must be left alone"
         );

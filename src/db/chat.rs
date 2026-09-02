@@ -226,6 +226,22 @@ impl Database {
             .optional()
     }
 
+    pub fn last_user_message_id_for_session(
+        &self,
+        chat_session_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT id FROM chat_messages
+                 WHERE chat_session_id = ?1 AND role = 'user'
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT 1",
+                params![chat_session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+    }
+
     /// Count all non-legacy messages for a session (legacy = empty assistant
     /// rows; see `NON_LEGACY_MESSAGE_PREDICATE`). Used to compute pagination
     /// metadata (`total_count`) so callers can derive the global index offset

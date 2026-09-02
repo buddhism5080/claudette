@@ -452,6 +452,26 @@ pub async fn create_turn_checkpoint_unless_present(
     create_turn_checkpoint(args).await
 }
 
+/// Open a checkpoint for this user-turn if none exists yet. Skips when a
+/// checkpoint is already anchored on the user message or any later row
+/// (first completed tool may have opened one on an earlier thinking block).
+pub async fn create_turn_checkpoint_for_open_turn(
+    args: CheckpointArgs<'_>,
+    turn_user_msg_id: &str,
+) -> Option<ConversationCheckpoint> {
+    if let Ok(db) = Database::open(args.db_path)
+        && (db
+            .session_has_checkpoint_on_or_after_message(args.chat_session_id, turn_user_msg_id)
+            .unwrap_or(false)
+            || db
+                .session_has_checkpoint_for_message(args.chat_session_id, args.anchor_msg_id)
+                .unwrap_or(false))
+    {
+        return None;
+    }
+    create_turn_checkpoint(args).await
+}
+
 /// Read the user-configured checkpoint retention count from `app_settings`,
 /// clamping to the safe range. Falls back to the default on any read /
 /// parse error so a corrupted setting can't disable file snapshots entirely.
@@ -1187,6 +1207,56 @@ mod tests {
                 .await
                 .is_none(),
             "second create for the same message must no-op"
+        );
+        let db = crate::db::Database::open(&db_path).unwrap();
+        let listed = db.list_checkpoints_for_session("cs-1").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, first.id);
+    }
+
+    #[tokio::test]
+    async fn create_turn_checkpoint_for_open_turn_skips_later_assistant_anchor() {
+        let (dir, db_path) = make_test_db().await;
+        let wt = make_empty_test_worktree(dir.path()).await;
+        let db = crate::db::Database::open(&db_path).unwrap();
+        db.execute_batch(
+            "INSERT INTO chat_messages (id, workspace_id, chat_session_id, role, content)
+             VALUES ('u1', 'ws-1', 'cs-1', 'user', 'hi'),
+                    ('a1', 'ws-1', 'cs-1', 'assistant', 'think'),
+                    ('a2', 'ws-1', 'cs-1', 'assistant', 'text');",
+        )
+        .unwrap();
+        drop(db);
+        let first = create_turn_checkpoint_for_open_turn(
+            CheckpointArgs {
+                db_path: &db_path,
+                workspace_id: "ws-1",
+                chat_session_id: "cs-1",
+                anchor_msg_id: "a1",
+                worktree_path: wt.to_str().unwrap(),
+                created_at: "now".into(),
+                claude_session_id: None,
+            },
+            "u1",
+        )
+        .await
+        .expect("first tool opens the turn checkpoint");
+        assert!(
+            create_turn_checkpoint_for_open_turn(
+                CheckpointArgs {
+                    db_path: &db_path,
+                    workspace_id: "ws-1",
+                    chat_session_id: "cs-1",
+                    anchor_msg_id: "a2",
+                    worktree_path: wt.to_str().unwrap(),
+                    created_at: "now".into(),
+                    claude_session_id: None,
+                },
+                "u1",
+            )
+            .await
+            .is_none(),
+            "Result/Stop must not mint a second checkpoint on a later text row"
         );
         let db = crate::db::Database::open(&db_path).unwrap();
         let listed = db.list_checkpoints_for_session("cs-1").unwrap();

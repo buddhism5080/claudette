@@ -17,13 +17,13 @@ use claudette::base64_decode;
 use claudette::chat::{
     BuildAssistantArgs, CheckpointArgs, RequestedFlags, SessionFlags, append_pending_thinking,
     assistant_usage_fields_from_result, build_compaction_sentinel, build_permission_response,
-    create_turn_checkpoint, create_turn_checkpoint_unless_present, extract_assistant_text, extract_event_thinking,
+    create_turn_checkpoint, create_turn_checkpoint_for_open_turn, extract_assistant_text, extract_event_thinking,
     persist_assistant_chat_message, persistent_session_flags_drifted,
 };
 use claudette::db::Database;
 use claudette::env::WorkspaceEnv;
 use claudette::mcp_supervisor::McpSupervisor;
-use claudette::model::{ChatMessage, ChatRole};
+use claudette::model::{ChatMessage, ChatRole, TurnToolActivity};
 use claudette::permissions::tools_for_level;
 
 use crate::state::{
@@ -593,6 +593,43 @@ fn tool_result_content_text(content: &serde_json::Value) -> String {
             .join("\n");
     }
     content.to_string()
+}
+
+struct PendingLiveTool {
+    name: String,
+    input_json: String,
+    sort_order: i32,
+    assistant_message_ordinal: i32,
+}
+
+fn persist_completed_tool_row(
+    db: &Database,
+    checkpoint_id: &str,
+    tool_use_id: &str,
+    pending: PendingLiveTool,
+    result_text: &str,
+) {
+    let activity = TurnToolActivity {
+        id: uuid::Uuid::new_v4().to_string(),
+        checkpoint_id: checkpoint_id.to_string(),
+        tool_use_id: tool_use_id.to_string(),
+        tool_name: pending.name.clone(),
+        input_json: pending.input_json,
+        result_text: result_text.to_string(),
+        summary: pending.name,
+        sort_order: pending.sort_order,
+        assistant_message_ordinal: pending.assistant_message_ordinal,
+        agent_task_id: None,
+        agent_description: None,
+        agent_last_tool_name: None,
+        agent_tool_use_count: None,
+        agent_status: None,
+        agent_tool_calls_json: "[]".into(),
+        agent_thinking_blocks_json: "[]".into(),
+        agent_result_text: None,
+        workflow_progress_json: "[]".into(),
+    };
+    let _ = db.upsert_turn_tool_activity(&activity);
 }
 
 fn shell_result_summary(content: &serde_json::Value) -> &'static str {
@@ -2554,6 +2591,13 @@ pub async fn send_chat_message(
         // MCP monitoring: map tool_use_id → tool_name for MCP error detection.
         let mut mcp_tool_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut pending_live_tools: std::collections::HashMap<String, PendingLiveTool> =
+            std::collections::HashMap::new();
+        let mut block_index_to_tool: std::collections::HashMap<usize, String> =
+            std::collections::HashMap::new();
+        let mut next_tool_sort: i32 = 0;
+        let mut assistant_block_count: i32 = 0;
+        let mut open_turn_checkpoint_id: Option<String> = None;
         let mut background_task_inputs = BackgroundTaskInputTracker::default();
         let mut team_agent_inputs = TeamAgentInputTracker::default();
         // Track the last assistant message inserted in THIS turn. Falls back
@@ -2784,14 +2828,28 @@ pub async fn send_chat_message(
             if let AgentEvent::Stream(StreamEvent::Stream {
                 event:
                     InnerStreamEvent::ContentBlockStart {
-                        content_block: Some(StartContentBlock::ToolUse { id, name, .. }),
-                        ..
+                        index,
+                        content_block: Some(StartContentBlock::ToolUse { id, name, input }),
                     },
             }) = &event
             {
                 if claudette::mcp_supervisor::extract_mcp_server_name(name).is_some() {
                     mcp_tool_names.insert(id.clone(), name.clone());
                 }
+                pending_live_tools.insert(
+                    id.clone(),
+                    PendingLiveTool {
+                        name: name.clone(),
+                        input_json: input
+                            .as_ref()
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                        sort_order: next_tool_sort,
+                        assistant_message_ordinal: assistant_block_count.saturating_sub(1),
+                    },
+                );
+                next_tool_sort += 1;
+                block_index_to_tool.insert(*index, id.clone());
                 // Thinking already has a row from content_block_start. Write
                 // the accumulated text onto that id — do not insert another.
                 if let Some(thinking) = pending_thinking.take() {
@@ -2880,6 +2938,62 @@ pub async fn send_chat_message(
                                     ..
                                 } => {
                                     let text = tool_result_content_text(content);
+                                    if !is_replay {
+                                        let pending = pending_live_tools.remove(tool_use_id);
+                                        let anchor = last_assistant_msg_id
+                                            .as_deref()
+                                            .unwrap_or(&user_msg_id);
+                                        if open_turn_checkpoint_id.is_none() {
+                                            if let Some(cp) = create_turn_checkpoint_for_open_turn(
+                                                CheckpointArgs {
+                                                    db_path: &db_path,
+                                                    workspace_id: &ws_id,
+                                                    chat_session_id: &chat_session_id_for_stream,
+                                                    anchor_msg_id: anchor,
+                                                    worktree_path: &wt_path,
+                                                    created_at: now_iso(),
+                                                    claude_session_id: claude_sid_for_stream
+                                                        .as_deref(),
+                                                },
+                                                &user_msg_id,
+                                            )
+                                            .await
+                                            {
+                                                let payload = serde_json::json!({
+                                                    "workspace_id": &ws_id,
+                                                    "chat_session_id": &chat_session_id_for_stream,
+                                                    "checkpoint": &cp,
+                                                });
+                                                let _ = app.emit("checkpoint-created", &payload);
+                                                open_turn_checkpoint_id = Some(cp.id);
+                                            } else if let Ok(db) = Database::open(&db_path) {
+                                                open_turn_checkpoint_id = db
+                                                    .latest_checkpoint_id_on_or_after_message(
+                                                        &chat_session_id_for_stream,
+                                                        &user_msg_id,
+                                                    )
+                                                    .ok()
+                                                    .flatten();
+                                            }
+                                        }
+                                        if let Some(cp_id) = open_turn_checkpoint_id.as_deref()
+                                            && let Ok(db) = Database::open(&db_path)
+                                        {
+                                            persist_completed_tool_row(
+                                                &db,
+                                                cp_id,
+                                                tool_use_id,
+                                                pending.unwrap_or(PendingLiveTool {
+                                                    name: "tool".into(),
+                                                    input_json: String::new(),
+                                                    sort_order: next_tool_sort,
+                                                    assistant_message_ordinal: assistant_block_count
+                                                        .saturating_sub(1),
+                                                }),
+                                                &text,
+                                            );
+                                        }
+                                    }
                                     // Workflow tool launched in the background:
                                     // arm the wake from its trusted launch
                                     // announcement (`Workflow launched in
@@ -3223,6 +3337,20 @@ pub async fn send_chat_message(
                 append_pending_thinking(&mut pending_thinking, thinking);
             }
 
+            if let AgentEvent::Stream(StreamEvent::Stream {
+                event:
+                    InnerStreamEvent::ContentBlockDelta {
+                        index,
+                        delta: Delta::InputJson { partial_json } | Delta::ToolUse { partial_json },
+                    },
+            }) = &event
+                && let Some(chunk) = partial_json
+                && let Some(tool_id) = block_index_to_tool.get(index)
+                && let Some(pending) = pending_live_tools.get_mut(tool_id)
+            {
+                pending.input_json.push_str(chunk);
+            }
+
             let mut persisted_message_id: Option<String> = None;
             if let AgentEvent::Stream(StreamEvent::Stream {
                 event: InnerStreamEvent::MessageStart {},
@@ -3265,6 +3393,7 @@ pub async fn send_chat_message(
                 {
                     last_assistant_msg_id = Some(msg.id.clone());
                     persisted_message_id = Some(msg.id.clone());
+                    assistant_block_count += 1;
                     if kind == "thinking" {
                         open_thinking_id = Some(msg.id);
                     } else {
@@ -3389,7 +3518,8 @@ pub async fn send_chat_message(
                 let anchor = last_assistant_msg_id
                     .as_deref()
                     .unwrap_or(&user_msg_id);
-                if let Some(cp) = create_turn_checkpoint_unless_present(CheckpointArgs {
+                if let Some(cp) = create_turn_checkpoint_for_open_turn(
+                    CheckpointArgs {
                     db_path: &db_path,
                     workspace_id: &ws_id,
                     chat_session_id: &chat_session_id_for_stream,
@@ -3397,7 +3527,9 @@ pub async fn send_chat_message(
                     worktree_path: &wt_path,
                     created_at: now_iso(),
                     claude_session_id: ended_session_id.as_deref().filter(|s| !s.is_empty()),
-                })
+                },
+                    &user_msg_id,
+                )
                 .await
                 {
                     let payload = serde_json::json!({
@@ -3534,7 +3666,8 @@ pub async fn send_chat_message(
                         .filter(|s| !s.trim().is_empty())
                         .or_else(|| claude_sid_for_stream.clone())
                 };
-                if let Some(cp) = create_turn_checkpoint_unless_present(CheckpointArgs {
+                if let Some(cp) = create_turn_checkpoint_for_open_turn(
+                    CheckpointArgs {
                     db_path: &db_path,
                     workspace_id: &ws_id,
                     chat_session_id: &chat_session_id_for_stream,
@@ -3542,7 +3675,9 @@ pub async fn send_chat_message(
                     worktree_path: &wt_path,
                     created_at: now_iso(),
                     claude_session_id: claude_sid_now.as_deref(),
-                })
+                },
+                    &user_msg_id,
+                )
                 .await
                 {
                     let payload = serde_json::json!({
