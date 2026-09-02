@@ -69,6 +69,9 @@ export function buildRollbackMap(
     if (cp) latestCp = cp;
 
     if (messages[i].role === "User") {
+      if (messages[i].parent_message_id) {
+        continue;
+      }
       if (firstUser) {
         // First user message of the full conversation: clear-all.
         result.set(i, null);

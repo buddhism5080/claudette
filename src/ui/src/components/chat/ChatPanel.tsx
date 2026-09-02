@@ -267,6 +267,7 @@ export function ChatPanel() {
     messageId: string,
     content: string,
     attachments?: AttachmentInput[],
+    parentMessageId?: string | null,
   ) => {
     addChatMessage(sessionId, {
       id: messageId,
@@ -282,6 +283,7 @@ export function ChatPanel() {
       output_tokens: null,
       cache_read_tokens: null,
       cache_creation_tokens: null,
+      parent_message_id: parentMessageId ?? null,
     });
     if (attachments?.length) {
       const optimisticAtts = attachments.map((a) => ({
@@ -351,7 +353,10 @@ export function ChatPanel() {
       history.push(content);
       historyIndexRef.current = -1;
       draftRef.current = "";
-      addPersistedUserMessageToStore(sessionId, messageId, content, attachments);
+      const parentId = [...(useAppStore.getState().chatMessages[sessionId] ?? [])]
+        .reverse()
+        .find((m) => m.role === "User" && !m.parent_message_id)?.id ?? null;
+      addPersistedUserMessageToStore(sessionId, messageId, content, attachments, parentId);
     } catch (e) {
       const errMsg = String(e);
       console.error("steerQueuedChatMessage (skip-queue) failed:", errMsg);
@@ -402,7 +407,10 @@ export function ChatPanel() {
       history.push(content);
       historyIndexRef.current = -1;
       draftRef.current = "";
-      addPersistedUserMessageToStore(sessionId, messageId, content, attachments);
+      const parentId = [...(useAppStore.getState().chatMessages[sessionId] ?? [])]
+        .reverse()
+        .find((m) => m.role === "User" && !m.parent_message_id)?.id ?? null;
+      addPersistedUserMessageToStore(sessionId, messageId, content, attachments, parentId);
     } catch (e) {
       const errMsg = String(e);
       console.error("steerQueuedChatMessage failed:", errMsg);

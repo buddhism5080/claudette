@@ -99,6 +99,7 @@ export function reconstructCompletedTurns(
         agentThinkingBlocks: parseStringArray(a.agent_thinking_blocks_json),
         agentResultText: a.agent_result_text,
         workflowProgress: parseWorkflowProgress(a.workflow_progress_json),
+        status: a.status === "running" || a.status === "error" ? a.status : "ok",
       })),
       messageCount: td.message_count,
       collapsed: true,

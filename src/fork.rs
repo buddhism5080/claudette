@@ -374,17 +374,16 @@ fn copy_history(
             output_tokens: msg.output_tokens,
             cache_read_tokens: msg.cache_read_tokens,
             cache_creation_tokens: msg.cache_creation_tokens,
+            parent_message_id: msg
+                .parent_message_id
+                .as_ref()
+                .and_then(|pid| msg_id_map.get(pid).cloned()),
         };
         db.insert_chat_message(&copied)?;
     }
 
     let source_checkpoints = db.list_checkpoints_up_to(source_ws_id, checkpoint.turn_index)?;
     let source_turn_data = db.list_completed_turns(source_ws_id)?;
-    let activities_by_cp: std::collections::HashMap<String, Vec<TurnToolActivity>> =
-        source_turn_data
-            .into_iter()
-            .map(|td| (td.checkpoint_id, td.activities))
-            .collect();
 
     for cp in source_checkpoints {
         let new_cp_id = uuid::Uuid::new_v4().to_string();
@@ -445,31 +444,39 @@ fn copy_history(
                 db.insert_checkpoint_files(&remapped_files)?;
             }
         }
+    }
 
-        if let Some(acts) = activities_by_cp.get(&cp.id) {
-            let remapped: Vec<TurnToolActivity> = acts
-                .iter()
-                .map(|a| TurnToolActivity {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    checkpoint_id: new_cp_id.clone(),
-                    tool_use_id: a.tool_use_id.clone(),
-                    tool_name: a.tool_name.clone(),
-                    input_json: a.input_json.clone(),
-                    result_text: a.result_text.clone(),
-                    summary: a.summary.clone(),
-                    sort_order: a.sort_order,
-                    assistant_message_ordinal: a.assistant_message_ordinal,
-                    agent_task_id: a.agent_task_id.clone(),
-                    agent_description: a.agent_description.clone(),
-                    agent_last_tool_name: a.agent_last_tool_name.clone(),
-                    agent_tool_use_count: a.agent_tool_use_count,
-                    agent_status: a.agent_status.clone(),
-                    agent_tool_calls_json: a.agent_tool_calls_json.clone(),
-                    agent_thinking_blocks_json: a.agent_thinking_blocks_json.clone(),
-                    agent_result_text: a.agent_result_text.clone(),
-                    workflow_progress_json: a.workflow_progress_json.clone(),
-                })
-                .collect();
+    for td in source_turn_data {
+        let Some(new_user_id) = msg_id_map.get(&td.message_id) else {
+            continue;
+        };
+        let remapped: Vec<TurnToolActivity> = td
+            .activities
+            .iter()
+            .map(|a| TurnToolActivity {
+                id: uuid::Uuid::new_v4().to_string(),
+                checkpoint_id: None,
+                user_message_id: new_user_id.clone(),
+                tool_use_id: a.tool_use_id.clone(),
+                tool_name: a.tool_name.clone(),
+                input_json: a.input_json.clone(),
+                result_text: a.result_text.clone(),
+                summary: a.summary.clone(),
+                sort_order: a.sort_order,
+                assistant_message_ordinal: a.assistant_message_ordinal,
+                agent_task_id: a.agent_task_id.clone(),
+                agent_description: a.agent_description.clone(),
+                agent_last_tool_name: a.agent_last_tool_name.clone(),
+                agent_tool_use_count: a.agent_tool_use_count,
+                agent_status: a.agent_status.clone(),
+                agent_tool_calls_json: a.agent_tool_calls_json.clone(),
+                agent_thinking_blocks_json: a.agent_thinking_blocks_json.clone(),
+                agent_result_text: a.agent_result_text.clone(),
+                workflow_progress_json: a.workflow_progress_json.clone(),
+                status: a.status.clone(),
+            })
+            .collect();
+        if !remapped.is_empty() {
             db.insert_turn_tool_activities(&remapped)?;
         }
     }
@@ -694,6 +701,7 @@ mod tests {
             output_tokens: None,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            parent_message_id: None,
         }
     }
 
@@ -749,7 +757,8 @@ mod tests {
             .unwrap();
         db.insert_turn_tool_activities(&[TurnToolActivity {
             id: "a1".into(),
-            checkpoint_id: "cp1".into(),
+            checkpoint_id: Some("cp1".into()),
+            user_message_id: "m1".into(),
             tool_use_id: "tu1".into(),
             tool_name: "Read".into(),
             input_json: "{}".into(),
@@ -766,11 +775,13 @@ mod tests {
             agent_thinking_blocks_json: "[]".into(),
             agent_result_text: None,
             workflow_progress_json: "[]".into(),
+            status: "ok".into(),
         }])
         .unwrap();
         db.insert_turn_tool_activities(&[TurnToolActivity {
             id: "a2".into(),
-            checkpoint_id: "cp2".into(),
+            checkpoint_id: Some("cp2".into()),
+            user_message_id: "m3".into(),
             tool_use_id: "tu2".into(),
             tool_name: "Edit".into(),
             input_json: "{}".into(),
@@ -787,6 +798,7 @@ mod tests {
             agent_thinking_blocks_json: "[]".into(),
             agent_result_text: None,
             workflow_progress_json: "[]".into(),
+            status: "ok".into(),
         }])
         .unwrap();
         db
@@ -1305,6 +1317,7 @@ mod tests {
             output_tokens: None,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            parent_message_id: None,
         })
         .unwrap();
         db.insert_checkpoint(&ConversationCheckpoint {

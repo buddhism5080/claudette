@@ -14,6 +14,8 @@ export interface ChatMessage {
   output_tokens: number | null;
   cache_read_tokens: number | null;
   cache_creation_tokens: number | null;
+  /** Steer bubbles point at the turn-start user. Null/undefined for a prompt. */
+  parent_message_id?: string | null;
 }
 
 export type SessionStatus = "Active" | "Archived";

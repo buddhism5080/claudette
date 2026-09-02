@@ -18,14 +18,16 @@ use super::{Database, retry_on_busy};
 
 const UPSERT_TURN_TOOL_ACTIVITY_SQL: &str = "
 INSERT INTO turn_tool_activities (
-    id, checkpoint_id, tool_use_id, tool_name, input_json,
+    id, checkpoint_id, user_message_id, tool_use_id, tool_name, input_json,
     result_text, summary, sort_order, assistant_message_ordinal,
     agent_task_id, agent_description, agent_last_tool_name,
     agent_tool_use_count, agent_status, agent_tool_calls_json,
-    agent_thinking_blocks_json, agent_result_text, workflow_progress_json
+    agent_thinking_blocks_json, agent_result_text, workflow_progress_json,
+    status
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
-ON CONFLICT(checkpoint_id, tool_use_id) DO UPDATE SET
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+ON CONFLICT(user_message_id, tool_use_id) DO UPDATE SET
+    checkpoint_id = excluded.checkpoint_id,
     tool_name = excluded.tool_name,
     input_json = excluded.input_json,
     result_text = excluded.result_text,
@@ -40,7 +42,8 @@ ON CONFLICT(checkpoint_id, tool_use_id) DO UPDATE SET
     agent_tool_calls_json = excluded.agent_tool_calls_json,
     agent_thinking_blocks_json = excluded.agent_thinking_blocks_json,
     agent_result_text = excluded.agent_result_text,
-    workflow_progress_json = excluded.workflow_progress_json
+    workflow_progress_json = excluded.workflow_progress_json,
+    status = excluded.status
 ";
 
 fn bind_turn_tool_activity(
@@ -50,6 +53,7 @@ fn bind_turn_tool_activity(
     stmt.execute(params![
         a.id,
         a.checkpoint_id,
+        a.user_message_id,
         a.tool_use_id,
         a.tool_name,
         a.input_json,
@@ -66,8 +70,75 @@ fn bind_turn_tool_activity(
         a.agent_thinking_blocks_json,
         a.agent_result_text,
         a.workflow_progress_json,
+        a.status,
     ])?;
     Ok(())
+}
+
+const TURN_TOOL_ACTIVITY_SELECT: &str = "ta.id, ta.checkpoint_id, ta.user_message_id, ta.tool_use_id, ta.tool_name,
+                    ta.input_json, ta.result_text, ta.summary, ta.sort_order,
+                    ta.assistant_message_ordinal, ta.agent_task_id,
+                    ta.agent_description, ta.agent_last_tool_name,
+                    ta.agent_tool_use_count, ta.agent_status, ta.agent_tool_calls_json,
+                    ta.agent_thinking_blocks_json, ta.agent_result_text, ta.workflow_progress_json,
+                    ta.status";
+
+fn parse_turn_tool_activity_row(row: &rusqlite::Row) -> rusqlite::Result<TurnToolActivity> {
+    Ok(TurnToolActivity {
+        id: row.get(0)?,
+        checkpoint_id: row.get(1)?,
+        user_message_id: row.get(2)?,
+        tool_use_id: row.get(3)?,
+        tool_name: row.get(4)?,
+        input_json: row.get(5)?,
+        result_text: row.get(6)?,
+        summary: row.get(7)?,
+        sort_order: row.get(8)?,
+        assistant_message_ordinal: row.get(9)?,
+        agent_task_id: row.get(10)?,
+        agent_description: row.get(11)?,
+        agent_last_tool_name: row.get(12)?,
+        agent_tool_use_count: row.get(13)?,
+        agent_status: row.get(14)?,
+        agent_tool_calls_json: row.get(15)?,
+        agent_thinking_blocks_json: row.get(16)?,
+        agent_result_text: row.get(17)?,
+        workflow_progress_json: row.get(18)?,
+        status: row.get(19)?,
+    })
+}
+
+fn group_activities_by_user_message(activities: Vec<TurnToolActivity>) -> Vec<CompletedTurnData> {
+    let mut order: Vec<String> = Vec::new();
+    let mut activity_map: std::collections::HashMap<String, Vec<TurnToolActivity>> =
+        std::collections::HashMap::new();
+    for a in activities {
+        if !activity_map.contains_key(&a.user_message_id) {
+            order.push(a.user_message_id.clone());
+        }
+        activity_map
+            .entry(a.user_message_id.clone())
+            .or_default()
+            .push(a);
+    }
+    order
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, uid)| {
+            let acts = activity_map.remove(&uid).unwrap_or_default();
+            if acts.is_empty() {
+                return None;
+            }
+            Some(CompletedTurnData {
+                checkpoint_id: uid.clone(),
+                message_id: uid,
+                turn_index: i as i32,
+                message_count: acts.len() as i32,
+                commit_hash: None,
+                activities: acts,
+            })
+        })
+        .collect()
 }
 
 /// Outcome of [`Database::finish_workflow_activity`].
@@ -571,13 +642,39 @@ impl Database {
         Ok(deleted)
     }
 
+    fn gzip_bytes(raw: &[u8]) -> Vec<u8> {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
+        if enc.write_all(raw).is_err() {
+            return raw.to_vec();
+        }
+        enc.finish().unwrap_or_else(|_| raw.to_vec())
+    }
+
+    fn gunzip_if_needed(bytes: Vec<u8>, compression: Option<&str>) -> Vec<u8> {
+        if compression != Some("gzip") {
+            return bytes;
+        }
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+        let mut decoder = GzDecoder::new(bytes.as_slice());
+        let mut out = Vec::new();
+        if decoder.read_to_end(&mut out).is_ok() {
+            out
+        } else {
+            bytes
+        }
+    }
+
     fn insert_checkpoint_files_tx(
         tx: &rusqlite::Transaction<'_>,
         files: &[CheckpointFile],
     ) -> Result<(), rusqlite::Error> {
         let mut upsert_blob = tx.prepare(
             "INSERT INTO checkpoint_blobs (sha256, bytes, byte_size, compression)
-             VALUES (?1, ?2, ?3, 'none')
+             VALUES (?1, ?2, ?3, 'gzip')
              ON CONFLICT(sha256) DO NOTHING",
         )?;
         let mut insert_file = tx.prepare(
@@ -602,7 +699,8 @@ impl Database {
                 }
             };
             if let Some(bytes) = &f.content {
-                upsert_blob.execute(params![sha, bytes, bytes.len() as i64])?;
+                let stored = Self::gzip_bytes(bytes);
+                upsert_blob.execute(params![sha, stored, bytes.len() as i64])?;
             }
             insert_file.execute(params![
                 f.id,
@@ -792,7 +890,7 @@ impl Database {
     ) -> Result<Vec<CheckpointFile>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT cf.id, cf.checkpoint_id, cf.file_path, cf.file_mode,
-                    cf.blob_sha256, cf.content, b.bytes
+                    cf.blob_sha256, cf.content, b.bytes, b.compression
              FROM checkpoint_files cf
              LEFT JOIN checkpoint_blobs b ON b.sha256 = cf.blob_sha256
              WHERE cf.checkpoint_id = ?1",
@@ -801,6 +899,10 @@ impl Database {
             let blob_sha256: Option<String> = row.get(4)?;
             let legacy_content: Option<Vec<u8>> = row.get(5)?;
             let blob_bytes: Option<Vec<u8>> = row.get(6)?;
+            let compression: Option<String> = row.get(7)?;
+            let blob_bytes = blob_bytes.map(|b| {
+                Database::gunzip_if_needed(b, compression.as_deref())
+            });
             // Prefer blob bytes when the row has been deduped/backfilled;
             // fall back to the row's own column for legacy un-backfilled rows.
             let content = match (blob_sha256.as_ref(), blob_bytes, legacy_content) {
@@ -1114,10 +1216,10 @@ impl Database {
             .query_row(
                 &format!(
                     "SELECT ta.id FROM turn_tool_activities ta
-                       JOIN conversation_checkpoints cp ON cp.id = ta.checkpoint_id
+                       JOIN chat_messages m ON m.id = ta.user_message_id
                       WHERE ta.tool_name = 'Workflow'
                         AND ta.{column} = ?1
-                        AND cp.chat_session_id = ?2
+                        AND m.chat_session_id = ?2
                       ORDER BY ta.rowid DESC LIMIT 1"
                 ),
                 params![value, chat_session_id],
@@ -1375,9 +1477,9 @@ impl Database {
             .join(", ");
         let sql = format!(
             "SELECT ta.id FROM turn_tool_activities ta
-               JOIN conversation_checkpoints cp ON cp.id = ta.checkpoint_id
+               JOIN chat_messages m ON m.id = ta.user_message_id
               WHERE ta.tool_name = 'Workflow'
-                AND cp.chat_session_id = ?1
+                AND m.chat_session_id = ?1
                 AND (ta.agent_status IS NULL
                      OR LOWER(TRIM(ta.agent_status)) NOT IN ({placeholders}))"
         );
@@ -1413,82 +1515,24 @@ impl Database {
         Ok(resolved)
     }
 
-    /// Load all completed turns for a workspace: checkpoints joined with their
-    /// tool activities, grouped by checkpoint and ordered by turn_index.
+    /// Load persisted tool activities grouped by the turn-start user message.
     pub fn list_completed_turns(
         &self,
         workspace_id: &str,
     ) -> Result<Vec<CompletedTurnData>, rusqlite::Error> {
-        // First get the checkpoints.
-        let checkpoints = self.list_checkpoints(workspace_id)?;
-
-        // Then load all activities for this workspace in one query.
-        let mut stmt = self.conn.prepare(
-            "SELECT ta.id, ta.checkpoint_id, ta.tool_use_id, ta.tool_name,
-                    ta.input_json, ta.result_text, ta.summary, ta.sort_order,
-                    ta.assistant_message_ordinal, ta.agent_task_id,
-                    ta.agent_description, ta.agent_last_tool_name,
-                    ta.agent_tool_use_count, ta.agent_status, ta.agent_tool_calls_json,
-                    ta.agent_thinking_blocks_json, ta.agent_result_text, ta.workflow_progress_json
+        let sql = format!(
+            "SELECT {cols}
              FROM turn_tool_activities ta
-             JOIN conversation_checkpoints cp ON ta.checkpoint_id = cp.id
-             WHERE cp.workspace_id = ?1
-             ORDER BY cp.turn_index, ta.assistant_message_ordinal, ta.sort_order",
-        )?;
+             JOIN chat_messages m ON m.id = ta.user_message_id
+             WHERE m.workspace_id = ?1
+             ORDER BY m.created_at, m.rowid, ta.assistant_message_ordinal, ta.sort_order",
+            cols = TURN_TOOL_ACTIVITY_SELECT
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let activities: Vec<TurnToolActivity> = stmt
-            .query_map(params![workspace_id], |row| {
-                Ok(TurnToolActivity {
-                    id: row.get(0)?,
-                    checkpoint_id: row.get(1)?,
-                    tool_use_id: row.get(2)?,
-                    tool_name: row.get(3)?,
-                    input_json: row.get(4)?,
-                    result_text: row.get(5)?,
-                    summary: row.get(6)?,
-                    sort_order: row.get(7)?,
-                    assistant_message_ordinal: row.get(8)?,
-                    agent_task_id: row.get(9)?,
-                    agent_description: row.get(10)?,
-                    agent_last_tool_name: row.get(11)?,
-                    agent_tool_use_count: row.get(12)?,
-                    agent_status: row.get(13)?,
-                    agent_tool_calls_json: row.get(14)?,
-                    agent_thinking_blocks_json: row.get(15)?,
-                    agent_result_text: row.get(16)?,
-                    workflow_progress_json: row.get(17)?,
-                })
-            })?
+            .query_map(params![workspace_id], parse_turn_tool_activity_row)?
             .collect::<Result<Vec<_>, _>>()?;
-
-        // Group activities by checkpoint_id.
-        let mut activity_map: std::collections::HashMap<String, Vec<TurnToolActivity>> =
-            std::collections::HashMap::new();
-        for a in activities {
-            activity_map
-                .entry(a.checkpoint_id.clone())
-                .or_default()
-                .push(a);
-        }
-
-        Ok(checkpoints
-            .into_iter()
-            .filter_map(|cp| {
-                let acts = activity_map.remove(&cp.id).unwrap_or_default();
-                // Only return turns that actually had tool activities.
-                // Checkpoints for assistant-only turns don't need summaries.
-                if acts.is_empty() {
-                    return None;
-                }
-                Some(CompletedTurnData {
-                    checkpoint_id: cp.id,
-                    message_id: cp.message_id,
-                    turn_index: cp.turn_index,
-                    message_count: cp.message_count,
-                    commit_hash: cp.commit_hash,
-                    activities: acts,
-                })
-            })
-            .collect())
+        Ok(group_activities_by_user_message(activities))
     }
 
     /// Delete all chat messages inserted after the given message (by rowid order).
@@ -1531,71 +1575,19 @@ impl Database {
         &self,
         chat_session_id: &str,
     ) -> Result<Vec<CompletedTurnData>, rusqlite::Error> {
-        let checkpoints = self.list_checkpoints_for_session(chat_session_id)?;
-
-        let mut stmt = self.conn.prepare(
-            "SELECT ta.id, ta.checkpoint_id, ta.tool_use_id, ta.tool_name,
-                    ta.input_json, ta.result_text, ta.summary, ta.sort_order,
-                    ta.assistant_message_ordinal, ta.agent_task_id,
-                    ta.agent_description, ta.agent_last_tool_name,
-                    ta.agent_tool_use_count, ta.agent_status, ta.agent_tool_calls_json,
-                    ta.agent_thinking_blocks_json, ta.agent_result_text, ta.workflow_progress_json
+        let sql = format!(
+            "SELECT {cols}
              FROM turn_tool_activities ta
-             JOIN conversation_checkpoints cp ON ta.checkpoint_id = cp.id
-             WHERE cp.chat_session_id = ?1
-             ORDER BY cp.turn_index, ta.assistant_message_ordinal, ta.sort_order",
-        )?;
+             JOIN chat_messages m ON m.id = ta.user_message_id
+             WHERE m.chat_session_id = ?1
+             ORDER BY m.created_at, m.rowid, ta.assistant_message_ordinal, ta.sort_order",
+            cols = TURN_TOOL_ACTIVITY_SELECT
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let activities: Vec<TurnToolActivity> = stmt
-            .query_map(params![chat_session_id], |row| {
-                Ok(TurnToolActivity {
-                    id: row.get(0)?,
-                    checkpoint_id: row.get(1)?,
-                    tool_use_id: row.get(2)?,
-                    tool_name: row.get(3)?,
-                    input_json: row.get(4)?,
-                    result_text: row.get(5)?,
-                    summary: row.get(6)?,
-                    sort_order: row.get(7)?,
-                    assistant_message_ordinal: row.get(8)?,
-                    agent_task_id: row.get(9)?,
-                    agent_description: row.get(10)?,
-                    agent_last_tool_name: row.get(11)?,
-                    agent_tool_use_count: row.get(12)?,
-                    agent_status: row.get(13)?,
-                    agent_tool_calls_json: row.get(14)?,
-                    agent_thinking_blocks_json: row.get(15)?,
-                    agent_result_text: row.get(16)?,
-                    workflow_progress_json: row.get(17)?,
-                })
-            })?
+            .query_map(params![chat_session_id], parse_turn_tool_activity_row)?
             .collect::<Result<Vec<_>, _>>()?;
-
-        let mut activity_map: std::collections::HashMap<String, Vec<TurnToolActivity>> =
-            std::collections::HashMap::new();
-        for a in activities {
-            activity_map
-                .entry(a.checkpoint_id.clone())
-                .or_default()
-                .push(a);
-        }
-
-        Ok(checkpoints
-            .into_iter()
-            .filter_map(|cp| {
-                let acts = activity_map.remove(&cp.id).unwrap_or_default();
-                if acts.is_empty() {
-                    return None;
-                }
-                Some(CompletedTurnData {
-                    checkpoint_id: cp.id,
-                    message_id: cp.message_id,
-                    turn_index: cp.turn_index,
-                    message_count: cp.message_count,
-                    commit_hash: cp.commit_hash,
-                    activities: acts,
-                })
-            })
-            .collect())
+        Ok(group_activities_by_user_message(activities))
     }
 }
 
@@ -1643,7 +1635,11 @@ mod tests {
     fn make_tool_activity(id: &str, cp_id: &str, tool: &str, order: i32) -> TurnToolActivity {
         TurnToolActivity {
             id: id.into(),
-            checkpoint_id: cp_id.into(),
+            checkpoint_id: Some(cp_id.into()),
+            user_message_id: cp_id
+                .strip_prefix("cp")
+                .map(|rest| format!("m{rest}"))
+                .unwrap_or_else(|| "m1".into()),
             tool_use_id: format!("tu_{id}"),
             tool_name: tool.into(),
             input_json: r#"{"file":"test.rs"}"#.to_string(),
@@ -1660,6 +1656,7 @@ mod tests {
             agent_thinking_blocks_json: "[]".into(),
             agent_result_text: None,
             workflow_progress_json: "[]".into(),
+            status: "ok".into(),
         }
     }
 
@@ -1883,7 +1880,6 @@ mod tests {
         let turns = db.list_completed_turns("w1").unwrap();
         assert_eq!(turns[0].activities.len(), 1);
         assert_eq!(turns[0].activities[0].result_text, "updated");
-        assert_eq!(turns[0].message_count, 2);
     }
 
     #[test]
@@ -1908,9 +1904,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_activities_cascade_on_checkpoint_delete() {
+    fn test_tool_activities_survive_checkpoint_delete() {
         let db = setup_db_with_workspace();
-        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::User, "q1"))
             .unwrap();
         db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
             .unwrap();
@@ -1920,15 +1916,32 @@ mod tests {
         db.delete_checkpoints_after("w1", -1).unwrap();
 
         let turns = db.list_completed_turns("w1").unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].message_id, "m1");
+        assert_eq!(turns[0].activities[0].tool_name, "Read");
+    }
+
+    #[test]
+    fn test_tool_activities_cascade_on_user_message_delete() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m0", "w1", ChatRole::User, "keep"))
+            .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::User, "q1"))
+            .unwrap();
+        let mut activity = make_tool_activity("a1", "cp1", "Read", 0);
+        activity.checkpoint_id = None;
+        db.insert_turn_tool_activities(&[activity]).unwrap();
+        db.delete_messages_after("w1", "m0").unwrap();
+        let turns = db.list_completed_turns("w1").unwrap();
         assert!(turns.is_empty());
     }
 
     #[test]
-    fn test_delete_checkpoint_deletes_exact_row_and_cascades_activities() {
+    fn test_delete_checkpoint_does_not_drop_tools() {
         let db = setup_db_with_workspace();
-        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::User, "q1"))
             .unwrap();
-        db.insert_chat_message(&make_chat_msg(&db, "m2", "w1", ChatRole::Assistant, "a2"))
+        db.insert_chat_message(&make_chat_msg(&db, "m2", "w1", ChatRole::User, "q2"))
             .unwrap();
         db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
             .unwrap();
@@ -1945,10 +1958,9 @@ mod tests {
         assert!(db.get_checkpoint("cp1").unwrap().is_none());
         assert!(db.get_checkpoint("cp2").unwrap().is_some());
         let turns = db.list_completed_turns("w1").unwrap();
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].checkpoint_id, "cp2");
-        assert_eq!(turns[0].activities.len(), 1);
-        assert_eq!(turns[0].activities[0].id, "a2");
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].message_id, "m1");
+        assert_eq!(turns[1].message_id, "m2");
     }
 
     /// Regression pin for #908: deleting a checkpoint via the application
@@ -2397,10 +2409,10 @@ mod tests {
         );
 
         let turns = db.list_completed_turns("w1").unwrap();
-        let status_of = |cp: &str, tool: &str| {
+        let status_of = |user: &str, tool: &str| {
             turns
                 .iter()
-                .find(|t| t.checkpoint_id == cp)
+                .find(|t| t.message_id == user)
                 .unwrap()
                 .activities
                 .iter()
@@ -2409,9 +2421,9 @@ mod tests {
                 .agent_status
                 .clone()
         };
-        assert_eq!(status_of("cp1", "Workflow").as_deref(), Some("completed"));
+        assert_eq!(status_of("m1", "Workflow").as_deref(), Some("completed"));
         assert_eq!(
-            status_of("cp2", "Bash").as_deref(),
+            status_of("m2", "Bash").as_deref(),
             Some("running"),
             "the colliding non-Workflow row must be left alone"
         );
@@ -2434,16 +2446,18 @@ mod tests {
         db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
             .unwrap();
         // The fork's checkpoint, hanging off its own session.
-        let mut fork_cp = make_checkpoint(&db, "cp2", "w1", "m1", 1);
+        let mut fork_msg = make_chat_msg(&db, "m-fork", "w1", ChatRole::Assistant, "a1");
+        fork_msg.chat_session_id = fork_session.clone();
+        db.insert_chat_message(&fork_msg).unwrap();
+        let mut fork_cp = make_checkpoint(&db, "cp2", "w1", "m-fork", 1);
         fork_cp.chat_session_id = fork_session.clone();
         db.insert_checkpoint(&fork_cp).unwrap();
 
         let mut source = make_tool_activity("a1", "cp1", "Workflow", 0);
         source.agent_task_id = Some("w2lwlmfps".into());
         source.agent_status = Some("running".into());
-        // What `fork::copy_checkpoints` produces: a new row id, the same
-        // `tool_use_id` and `agent_task_id`.
         let mut forked = make_tool_activity("a2", "cp2", "Workflow", 0);
+        forked.user_message_id = "m-fork".into();
         forked.tool_use_id = "tu_a1".into();
         forked.agent_task_id = Some("w2lwlmfps".into());
         forked.agent_status = Some("running".into());
@@ -2718,7 +2732,10 @@ mod tests {
             .unwrap();
         db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
             .unwrap();
-        let mut sibling_cp = make_checkpoint(&db, "cp2", "w1", "m1", 1);
+        let mut sibling_msg = make_chat_msg(&db, "m-sib", "w1", ChatRole::Assistant, "a1");
+        sibling_msg.chat_session_id = sibling.clone();
+        db.insert_chat_message(&sibling_msg).unwrap();
+        let mut sibling_cp = make_checkpoint(&db, "cp2", "w1", "m-sib", 1);
         sibling_cp.chat_session_id = sibling.clone();
         db.insert_checkpoint(&sibling_cp).unwrap();
 
@@ -2731,6 +2748,7 @@ mod tests {
         settled.agent_status = Some("completed".into());
         // A sibling session's live run.
         let mut sibling_run = make_tool_activity("a3", "cp2", "Workflow", 0);
+        sibling_run.user_message_id = "m-sib".into();
         sibling_run.agent_status = Some("running".into());
         db.insert_turn_tool_activities(&[wedged, settled, sibling_run])
             .unwrap();
@@ -3820,5 +3838,30 @@ mod tests {
             1,
             "shared blob must survive because w2 still references it"
         );
+    }
+
+    #[test]
+    fn upsert_without_checkpoint_groups_by_user_message() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::User, "q"))
+            .unwrap();
+        let mut activity = make_tool_activity("a1", "cp1", "Read", 0);
+        activity.checkpoint_id = None;
+        db.upsert_turn_tool_activity(&activity).unwrap();
+        let turns = db.list_completed_turns("w1").unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].message_id, "m1");
+        assert_eq!(turns[0].activities[0].status, "ok");
+        assert!(turns[0].activities[0].checkpoint_id.is_none());
+    }
+
+    #[test]
+    fn cap_tool_result_text_truncates_long_payload() {
+        use crate::model::{cap_tool_result_text, TOOL_RESULT_TEXT_MAX_CHARS};
+        let s = "x".repeat(TOOL_RESULT_TEXT_MAX_CHARS + 50);
+        let capped = cap_tool_result_text(&s);
+        assert!(capped.ends_with("…(truncated)"));
+        assert!(capped.chars().count() < s.chars().count());
+        assert_eq!(cap_tool_result_text("short"), "short");
     }
 }

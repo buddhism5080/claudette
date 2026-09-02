@@ -36,6 +36,7 @@ export interface ToolActivity {
   agentToolCalls?: AgentToolCall[];
   agentThinkingBlocks?: string[];
   agentResultText?: string | null;
+  status?: "running" | "ok" | "error";
   /** Phase/agent tree for a `Workflow` tool activity. Undefined for every
    *  other tool, and also for a workflow whose first progress tick hasn't
    *  landed yet. */

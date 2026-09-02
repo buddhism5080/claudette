@@ -167,28 +167,27 @@ function GenericToolActivityRow({
   // accessible label keeps the full `activity.toolName` (incl. the
   // `mcp__<server>__` prefix) so screen-reader users get an unambiguous,
   // server-qualified name — two servers can each expose a `query` tool.
-  const label = `${expanded ? "Collapse" : "Expand"} ${activity.toolName} input details`;
+  const label = `${expanded ? "Collapse" : "Expand"} ${activity.toolName}`;
+  const resultText = activity.resultText.trim();
 
   return (
     <div key={activity.toolUseId} className={styles.toolActivity}>
       <div className={styles.toolHeader}>
-        {extendedToolCallOutput && (
-          <button
-            type="button"
-            role="button"
-            className={`${styles.toolDetailsToggle} ${
-              expanded ? styles.toolDetailsToggleExpanded : ""
-            }`}
-            aria-expanded={expanded}
-            aria-label={label}
-            onClick={(event) => {
-              event.stopPropagation();
-              toggleToolUseExpanded(activity.toolUseId);
-            }}
-          >
-            <ChevronRight size={13} aria-hidden="true" />
-          </button>
-        )}
+        <button
+          type="button"
+          role="button"
+          className={`${styles.toolDetailsToggle} ${
+            expanded ? styles.toolDetailsToggleExpanded : ""
+          }`}
+          aria-expanded={expanded}
+          aria-label={label}
+          onClick={(event) => {
+            event.stopPropagation();
+            toggleToolUseExpanded(activity.toolUseId);
+          }}
+        >
+          <ChevronRight size={13} aria-hidden="true" />
+        </button>
         {editSummary ? (
           <InlineEditSummary
             summary={editSummary}
@@ -213,22 +212,36 @@ function GenericToolActivityRow({
           </span>
         )}
       </div>
-      {extendedToolCallOutput && expanded && (
-        <CodeBlock
-          className={styles.toolDetailsCode}
-          onClick={(event: MouseEvent<HTMLPreElement>) => event.stopPropagation()}
-        >
-          {details.lang && cachedHtml != null ? (
-            <code
-              className={`language-${details.lang}`}
-              dangerouslySetInnerHTML={{ __html: cachedHtml }}
-            />
-          ) : (
-            <code className={details.lang ? `language-${details.lang}` : undefined}>
-              {details.content}
-            </code>
+      {expanded && (
+        <>
+          {extendedToolCallOutput && (
+            <CodeBlock
+              className={styles.toolDetailsCode}
+              onClick={(event: MouseEvent<HTMLPreElement>) => event.stopPropagation()}
+            >
+              {details.lang && cachedHtml != null ? (
+                <code
+                  className={`language-${details.lang}`}
+                  dangerouslySetInnerHTML={{ __html: cachedHtml }}
+                />
+              ) : (
+                <code className={details.lang ? `language-${details.lang}` : undefined}>
+                  {details.content}
+                </code>
+              )}
+            </CodeBlock>
           )}
-        </CodeBlock>
+          {resultText ? (
+            <CodeBlock
+              className={styles.toolDetailsCode}
+              onClick={(event: MouseEvent<HTMLPreElement>) => event.stopPropagation()}
+            >
+              <code>{resultText}</code>
+            </CodeBlock>
+          ) : activity.status === "running" || !activity.status ? (
+            <div className={styles.toolSummary}>Running…</div>
+          ) : null}
+        </>
       )}
     </div>
   );

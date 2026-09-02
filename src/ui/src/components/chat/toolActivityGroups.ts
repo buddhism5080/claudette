@@ -125,6 +125,8 @@ export function groupHasRunningActivity(
   parentIsRunning = false,
 ): boolean {
   return activities.some((activity) => {
+    if (activity.status === "ok" || activity.status === "error") return false;
+    if (activity.status === "running") return true;
     if (activity.resultText.length > 0) return false;
     if (isAgentActivity(activity)) {
       const status = (activity.agentStatus ?? "").toLowerCase();

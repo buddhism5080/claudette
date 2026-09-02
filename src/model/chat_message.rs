@@ -67,4 +67,8 @@ pub struct ChatMessage {
     /// Per-message cache-creation input tokens (maps to
     /// `cache_creation_input_tokens` in the Anthropic API). NULL for historical rows.
     pub cache_creation_tokens: Option<i64>,
+    /// Steer bubbles point at the turn-start user message. NULL for a
+    /// normal prompt. Rollback is offered only on NULL (turn-start) users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_message_id: Option<String>,
 }

@@ -17,7 +17,7 @@ use claudette::base64_decode;
 use claudette::chat::{
     BuildAssistantArgs, CheckpointArgs, RequestedFlags, SessionFlags, append_pending_thinking,
     assistant_usage_fields_from_result, build_compaction_sentinel, build_permission_response,
-    create_turn_checkpoint, create_turn_checkpoint_for_open_turn, extract_assistant_text, extract_event_thinking,
+    create_turn_checkpoint_unless_present, extract_assistant_text, extract_event_thinking,
     persist_assistant_chat_message, persistent_session_flags_drifted,
 };
 use claudette::db::Database;
@@ -332,6 +332,7 @@ fn post_agent_auth_failure_message(
         output_tokens: None,
         cache_read_tokens: None,
         cache_creation_tokens: None,
+        parent_message_id: None,
     };
 
     match Database::open(db_path).and_then(|db| db.insert_chat_message(&message)) {
@@ -604,18 +605,20 @@ struct PendingLiveTool {
 
 fn persist_completed_tool_row(
     db: &Database,
-    checkpoint_id: &str,
+    user_message_id: &str,
     tool_use_id: &str,
     pending: PendingLiveTool,
     result_text: &str,
+    is_error: bool,
 ) {
     let activity = TurnToolActivity {
         id: uuid::Uuid::new_v4().to_string(),
-        checkpoint_id: checkpoint_id.to_string(),
+        checkpoint_id: None,
+        user_message_id: user_message_id.to_string(),
         tool_use_id: tool_use_id.to_string(),
         tool_name: pending.name.clone(),
         input_json: pending.input_json,
-        result_text: result_text.to_string(),
+        result_text: claudette::model::cap_tool_result_text(result_text),
         summary: pending.name,
         sort_order: pending.sort_order,
         assistant_message_ordinal: pending.assistant_message_ordinal,
@@ -628,6 +631,7 @@ fn persist_completed_tool_row(
         agent_thinking_blocks_json: "[]".into(),
         agent_result_text: None,
         workflow_progress_json: "[]".into(),
+        status: if is_error { "error" } else { "ok" }.into(),
     };
     let _ = db.upsert_turn_tool_activity(&activity);
 }
@@ -846,6 +850,7 @@ fn prepare_user_send(
         output_tokens: None,
         cache_read_tokens: None,
         cache_creation_tokens: None,
+        parent_message_id: None,
     };
 
     let mut att_models: Vec<claudette::model::Attachment> = Vec::new();
@@ -956,12 +961,7 @@ pub(super) fn is_native_compact_intent(harness: AgentBackendRuntimeHarness, prom
     matches!(harness, AgentBackendRuntimeHarness::CodexAppServer)
 }
 
-fn cleanup_failed_steer_persistence(
-    db: &Database,
-    checkpoint_id: &str,
-    message_id: &str,
-    cause: &str,
-) {
+fn cleanup_failed_steer_persistence(db: &Database, message_id: &str, cause: &str) {
     if let Err(e) = db.delete_chat_message(message_id) {
         tracing::warn!(
             target: "claudette::chat",
@@ -969,15 +969,6 @@ fn cleanup_failed_steer_persistence(
             cause,
             error = %e,
             "failed to clean up steered user message"
-        );
-    }
-    if let Err(e) = db.delete_checkpoint(checkpoint_id) {
-        tracing::warn!(
-            target: "claudette::chat",
-            checkpoint_id,
-            cause,
-            error = %e,
-            "failed to clean up pre-steer checkpoint"
         );
     }
 }
@@ -1028,30 +1019,16 @@ pub async fn steer_queued_chat_message(
             .ok_or("No active persistent Claude session for this chat")?
     };
 
-    let prepared_user_send = prepare_user_send(
+    let mut prepared_user_send = prepare_user_send(
         &workspace_id,
         &chat_session_id,
         message_id,
         &content,
         attachments.as_deref(),
     )?;
-
-    let anchor_msg_id = db
-        .last_chat_message_id_for_session(&chat_session_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Cannot steer before chat history has a message")?;
-    let pre_steer_checkpoint = create_turn_checkpoint(CheckpointArgs {
-        db_path: &state.db_path,
-        workspace_id: &workspace_id,
-        chat_session_id: &chat_session_id,
-        anchor_msg_id: &anchor_msg_id,
-        worktree_path: &worktree_path,
-        created_at: now_iso(),
-        claude_session_id: None,
-    })
-    .await
-    .ok_or("Failed to create pre-steer checkpoint")?;
-    let pre_steer_checkpoint_id = pre_steer_checkpoint.id.clone();
+    prepared_user_send.user_msg.parent_message_id = db
+        .last_user_message_id_for_session(&chat_session_id)
+        .map_err(|e| e.to_string())?;
 
     let prompt = claudette::file_expand::expand_file_mentions(
         std::path::Path::new(&worktree_path),
@@ -1061,27 +1038,17 @@ pub async fn steer_queued_chat_message(
     .await;
 
     if let Err(e) = persist_user_send(&db, &prepared_user_send) {
-        cleanup_failed_steer_persistence(
-            &db,
-            &pre_steer_checkpoint_id,
-            &prepared_user_send.user_msg.id,
-            "persist failure",
-        );
+        cleanup_failed_steer_persistence(&db, &prepared_user_send.user_msg.id, "persist failure");
         return Err(e);
     }
     if let Err(e) = ps
         .steer_user_message(&prompt, &prepared_user_send.cli_atts)
         .await
     {
-        cleanup_failed_steer_persistence(
-            &db,
-            &pre_steer_checkpoint_id,
-            &prepared_user_send.user_msg.id,
-            "stdin write failure",
-        );
+        cleanup_failed_steer_persistence(&db, &prepared_user_send.user_msg.id, "stdin write failure");
         return Err(e);
     }
-    Ok(Some(pre_steer_checkpoint))
+    Ok(None)
 }
 
 #[tauri::command]
@@ -1201,6 +1168,31 @@ pub async fn send_chat_message(
             "/compact does not accept attachments — clear the attachments before invoking it."
                 .to_string(),
         );
+    }
+    if let Some(anchor) = db
+        .last_chat_message_id_for_session(&chat_session_id)
+        .map_err(|e| e.to_string())?
+    {
+        if let Some(cp) = create_turn_checkpoint_unless_present(CheckpointArgs {
+            db_path: &state.db_path,
+            workspace_id: &workspace_id,
+            chat_session_id: &chat_session_id,
+            anchor_msg_id: &anchor,
+            worktree_path: &worktree_path,
+            created_at: now_iso(),
+            claude_session_id: persisted_cli_session_id
+                .as_deref()
+                .filter(|s| !s.is_empty()),
+        })
+        .await
+        {
+            let payload = serde_json::json!({
+                "workspace_id": &workspace_id,
+                "chat_session_id": &chat_session_id,
+                "checkpoint": &cp,
+            });
+            let _ = app.emit("checkpoint-created", &payload);
+        }
     }
     persist_user_send(&db, &prepared_user_send)?;
     let user_msg = prepared_user_send.user_msg.clone();
@@ -1902,6 +1894,7 @@ pub async fn send_chat_message(
                 output_tokens: None,
                 cache_read_tokens: None,
                 cache_creation_tokens: None,
+                parent_message_id: None,
             };
             if let Err(err) = db.insert_chat_message(&warning) {
                 // Logging-only: a missing warning shouldn't block the turn.
@@ -2597,7 +2590,6 @@ pub async fn send_chat_message(
             std::collections::HashMap::new();
         let mut next_tool_sort: i32 = 0;
         let mut assistant_block_count: i32 = 0;
-        let mut open_turn_checkpoint_id: Option<String> = None;
         let mut background_task_inputs = BackgroundTaskInputTracker::default();
         let mut team_agent_inputs = TeamAgentInputTracker::default();
         // Track the last assistant message inserted in THIS turn. Falls back
@@ -2909,6 +2901,7 @@ pub async fn send_chat_message(
                     output_tokens: None,
                     cache_read_tokens: None,
                     cache_creation_tokens: None,
+                    parent_message_id: None,
                 };
                 let _ = db.insert_chat_message(&msg);
             }
@@ -2935,53 +2928,15 @@ pub async fn send_chat_message(
                                 claudette::agent::UserContentBlock::ToolResult {
                                     tool_use_id,
                                     content,
-                                    ..
+                                    is_error,
                                 } => {
                                     let text = tool_result_content_text(content);
                                     if !is_replay {
                                         let pending = pending_live_tools.remove(tool_use_id);
-                                        let anchor = last_assistant_msg_id
-                                            .as_deref()
-                                            .unwrap_or(&user_msg_id);
-                                        if open_turn_checkpoint_id.is_none() {
-                                            if let Some(cp) = create_turn_checkpoint_for_open_turn(
-                                                CheckpointArgs {
-                                                    db_path: &db_path,
-                                                    workspace_id: &ws_id,
-                                                    chat_session_id: &chat_session_id_for_stream,
-                                                    anchor_msg_id: anchor,
-                                                    worktree_path: &wt_path,
-                                                    created_at: now_iso(),
-                                                    claude_session_id: claude_sid_for_stream
-                                                        .as_deref(),
-                                                },
-                                                &user_msg_id,
-                                            )
-                                            .await
-                                            {
-                                                let payload = serde_json::json!({
-                                                    "workspace_id": &ws_id,
-                                                    "chat_session_id": &chat_session_id_for_stream,
-                                                    "checkpoint": &cp,
-                                                });
-                                                let _ = app.emit("checkpoint-created", &payload);
-                                                open_turn_checkpoint_id = Some(cp.id);
-                                            } else if let Ok(db) = Database::open(&db_path) {
-                                                open_turn_checkpoint_id = db
-                                                    .latest_checkpoint_id_on_or_after_message(
-                                                        &chat_session_id_for_stream,
-                                                        &user_msg_id,
-                                                    )
-                                                    .ok()
-                                                    .flatten();
-                                            }
-                                        }
-                                        if let Some(cp_id) = open_turn_checkpoint_id.as_deref()
-                                            && let Ok(db) = Database::open(&db_path)
-                                        {
+                                        if let Ok(db) = Database::open(&db_path) {
                                             persist_completed_tool_row(
                                                 &db,
-                                                cp_id,
+                                                &user_msg_id,
                                                 tool_use_id,
                                                 pending.unwrap_or(PendingLiveTool {
                                                     name: "tool".into(),
@@ -2991,6 +2946,7 @@ pub async fn send_chat_message(
                                                         .saturating_sub(1),
                                                 }),
                                                 &text,
+                                                is_error.unwrap_or(false),
                                             );
                                         }
                                     }
@@ -3511,34 +3467,6 @@ pub async fn send_chat_message(
 
                 drop(agents);
                 crate::tray::rebuild_tray(&app);
-                // User stop / crash never emit Result, so tools never got a
-                // checkpoint. Create one on the last live assistant (or user)
-                // row so restart can hydrate the tool cards. Stop may have
-                // already created this; unless_present de-dupes.
-                let anchor = last_assistant_msg_id
-                    .as_deref()
-                    .unwrap_or(&user_msg_id);
-                if let Some(cp) = create_turn_checkpoint_for_open_turn(
-                    CheckpointArgs {
-                    db_path: &db_path,
-                    workspace_id: &ws_id,
-                    chat_session_id: &chat_session_id_for_stream,
-                    anchor_msg_id: anchor,
-                    worktree_path: &wt_path,
-                    created_at: now_iso(),
-                    claude_session_id: ended_session_id.as_deref().filter(|s| !s.is_empty()),
-                },
-                    &user_msg_id,
-                )
-                .await
-                {
-                    let payload = serde_json::json!({
-                        "workspace_id": &ws_id,
-                        "chat_session_id": &chat_session_id_for_stream,
-                        "checkpoint": &cp,
-                    });
-                    let _ = app.emit("checkpoint-created", &payload);
-                }
             }
             // Fill rows opened at content_block_start. Insert only when the
             // CLI skipped partials so no live id exists yet.
@@ -3655,38 +3583,6 @@ pub async fn send_chat_message(
                         let _ = db.update_chat_message_cost(msg_id, *cost, *dur);
                     }
                 }
-
-                let anchor_msg_id = last_assistant_msg_id.as_deref().unwrap_or(&user_msg_id);
-                let claude_sid_now = {
-                    let app_state = app.state::<AppState>();
-                    let agents = app_state.agents.read().await;
-                    agents
-                        .get(&chat_session_id_for_stream)
-                        .map(|s| s.session_id.clone())
-                        .filter(|s| !s.trim().is_empty())
-                        .or_else(|| claude_sid_for_stream.clone())
-                };
-                if let Some(cp) = create_turn_checkpoint_for_open_turn(
-                    CheckpointArgs {
-                    db_path: &db_path,
-                    workspace_id: &ws_id,
-                    chat_session_id: &chat_session_id_for_stream,
-                    anchor_msg_id,
-                    worktree_path: &wt_path,
-                    created_at: now_iso(),
-                    claude_session_id: claude_sid_now.as_deref(),
-                },
-                    &user_msg_id,
-                )
-                .await
-                {
-                    let payload = serde_json::json!({
-                        "workspace_id": &ws_id,
-                        "chat_session_id": &chat_session_id_for_stream,
-                        "checkpoint": &cp,
-                    });
-                    let _ = app.emit("checkpoint-created", &payload);
-                }
             }
 
             let payload = AgentStreamPayload {
@@ -3735,6 +3631,7 @@ mod tests {
             output_tokens: None,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            parent_message_id: None,
         }
     }
 

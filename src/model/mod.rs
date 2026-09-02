@@ -21,7 +21,10 @@ pub use cesp::{
 };
 pub use chat_message::{ChatMessage, ChatRole};
 pub use chat_session::{AttentionKind, ChatSession, SessionStatus, validate_session_name};
-pub use checkpoint::{CheckpointFile, CompletedTurnData, ConversationCheckpoint, TurnToolActivity};
+pub use checkpoint::{
+    cap_tool_result_text, CheckpointFile, CompletedTurnData, ConversationCheckpoint,
+    TurnToolActivity, TOOL_RESULT_TEXT_MAX_CHARS,
+};
 pub use metrics::{
     AgentCommit, AgentSession, AnalyticsMetrics, DashboardMetrics, DeletedWorkspaceSummary,
     HeatmapCell, RepoLeaderRow, SessionDot, WorkspaceMetrics,

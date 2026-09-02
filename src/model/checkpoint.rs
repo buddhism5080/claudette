@@ -48,7 +48,9 @@ pub struct CheckpointFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnToolActivity {
     pub id: String,
-    pub checkpoint_id: String,
+    pub checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub user_message_id: String,
     pub tool_use_id: String,
     pub tool_name: String,
     pub input_json: String,
@@ -74,15 +76,39 @@ pub struct TurnToolActivity {
     /// the column existed still load.
     #[serde(default = "empty_json_array")]
     pub workflow_progress_json: String,
+    /// `running` | `ok` | `error`. Empty result_text is no longer the
+    /// running signal — a finished call can have a truncated empty body.
+    #[serde(default = "default_tool_status")]
+    pub status: String,
+}
+
+pub const TOOL_RESULT_TEXT_MAX_CHARS: usize = 8 * 1024;
+
+/// Cap a tool result for SQLite + UI. Full payloads belong in the CLI jsonl,
+/// not this table.
+pub fn cap_tool_result_text(s: &str) -> String {
+    match s.char_indices().nth(TOOL_RESULT_TEXT_MAX_CHARS) {
+        None => s.to_string(),
+        Some((idx, _)) => {
+            let mut out = s[..idx].to_string();
+            out.push_str("\n…(truncated)");
+            out
+        }
+    }
 }
 
 fn empty_json_array() -> String {
     "[]".to_string()
 }
 
-/// Grouped checkpoint + activities for loading completed turns.
+fn default_tool_status() -> String {
+    "ok".to_string()
+}
+
+/// Grouped turn-start user message + activities for loading completed turns.
 #[derive(Debug, Clone, Serialize)]
 pub struct CompletedTurnData {
+    /// Turn-start user message id (also used as the UI turn id).
     pub checkpoint_id: String,
     pub message_id: String,
     pub turn_index: i32,

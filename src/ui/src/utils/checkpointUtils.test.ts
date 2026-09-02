@@ -162,8 +162,27 @@ describe("clearAllHasFileChanges", () => {
   });
 });
 
-function msg(id: string, role: "User" | "Assistant" | "System"): ChatMessage {
-  return { id, workspace_id: "ws", chat_session_id: "ws", role, content: "", cost_usd: null, duration_ms: null, created_at: "", thinking: null, input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null };
+function msg(
+  id: string,
+  role: "User" | "Assistant" | "System",
+  parent?: string,
+): ChatMessage {
+  return {
+    id,
+    workspace_id: "ws",
+    chat_session_id: "ws",
+    role,
+    content: "",
+    cost_usd: null,
+    duration_ms: null,
+    created_at: "",
+    thinking: null,
+    input_tokens: null,
+    output_tokens: null,
+    cache_read_tokens: null,
+    cache_creation_tokens: null,
+    parent_message_id: parent ?? null,
+  };
 }
 
 describe("buildRollbackMap", () => {
@@ -191,15 +210,16 @@ describe("buildRollbackMap", () => {
     expect(result.get(2)?.id).toBe("cp1");
   });
 
-  it("maps a steered user message to a pre-steer checkpoint in the same turn", () => {
+  it("does not offer rollback on a steered user hanging under the turn prompt", () => {
     const messages = [
       msg("m1", "User"),
-      msg("m2", "User"),
+      msg("m2", "User", "m1"),
       msg("m3", "Assistant"),
     ];
-    const cps = [{ ...cp("cp-pre-steer", null, 0), message_id: "m1" }];
+    const cps = [{ ...cp("cp-prev", null, 0), message_id: "m0" }];
     const result = buildRollbackMap(messages, cps);
-    expect(result.get(1)?.id).toBe("cp-pre-steer");
+    expect(result.has(1)).toBe(false);
+    expect(result.get(0)).toBeNull();
   });
 
   it("scans backward past interrupted turn to find checkpoint", () => {

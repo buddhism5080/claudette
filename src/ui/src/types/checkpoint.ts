@@ -11,7 +11,8 @@ export interface ConversationCheckpoint {
 
 export interface TurnToolActivityData {
   id: string;
-  checkpoint_id: string;
+  checkpoint_id: string | null;
+  user_message_id?: string;
   tool_use_id: string;
   tool_name: string;
   input_json: string;
@@ -30,6 +31,7 @@ export interface TurnToolActivityData {
   /** Serialized `WorkflowProgressEntry[]` for a `Workflow` tool activity;
    *  `"[]"` for every other tool. */
   workflow_progress_json: string;
+  status?: string;
 }
 
 export interface CompletedTurnData {

@@ -289,4 +289,9 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("20260902120000_turn_tool_activity_checkpoint_tool_use_unique.sql"),
         legacy_version: None,
     },
+    Migration {
+        id: "20260902180000_tools_on_user_message",
+        sql: include_str!("20260902180000_tools_on_user_message.sql"),
+        legacy_version: None,
+    },
 ];

@@ -93,6 +93,7 @@ fn make_message(id: &str, workspace_id: &str, session_id: &str, role: ChatRole) 
         output_tokens: None,
         cache_read_tokens: None,
         cache_creation_tokens: None,
+        parent_message_id: None,
     }
 }
 

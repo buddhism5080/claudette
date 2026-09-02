@@ -37,6 +37,7 @@ import { SetupScriptBanner } from "./SetupScriptBanner";
 import { formatElapsedSeconds } from "./chatHelpers";
 import { extractMentionPaths } from "./queuedMessageEditing";
 import { usePendingChatPrompt } from "./usePendingChatPrompt";
+import { useAppStore } from "../../stores/useAppStore";
 import styles from "./ChatPanel.module.css";
 import type { useChatPanelStore } from "./useChatPanelStore";
 
@@ -298,6 +299,14 @@ export function ChatPanelSessionView({
                       const toolUseId = pendingQuestion.toolUseId;
                       try {
                         await submitAgentAnswer(sid, toolUseId, answers);
+                        const rendered = Object.entries(answers)
+                          .map(([q, a]) => `${q}: ${a}`)
+                          .join("\n");
+                        useAppStore.getState().updateToolActivity(sid, toolUseId, {
+                          resultText: rendered,
+                          summary: rendered.split("\n")[0] || "answered",
+                          status: "ok",
+                        });
                         clearAgentQuestion(sid);
                       } catch (e) {
                         console.error("Failed to submit agent answer:", e);
@@ -319,6 +328,14 @@ export function ChatPanelSessionView({
                       const codexPlanApproval = pendingPlan.source === "codex";
                       try {
                         await submitPlanApproval(sid, toolUseId, approved, reason);
+                        const rendered = approved
+                          ? "Approved plan"
+                          : `Rejected plan${reason?.trim() ? `: ${reason.trim()}` : ""}`;
+                        useAppStore.getState().updateToolActivity(sid, toolUseId, {
+                          resultText: rendered,
+                          summary: rendered,
+                          status: "ok",
+                        });
                         clearPlanApproval(sid);
                         if (codexPlanApproval) {
                           if (approved) {
