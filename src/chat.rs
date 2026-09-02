@@ -436,6 +436,22 @@ pub async fn create_turn_checkpoint(args: CheckpointArgs<'_>) -> Option<Conversa
     Some(checkpoint)
 }
 
+/// Create a checkpoint unless this session already has one on `anchor_msg_id`.
+/// Used by the Result path and by abort (Stop / ProcessExited) so tools
+/// survive restart without minting two restore points for the same row.
+pub async fn create_turn_checkpoint_unless_present(
+    args: CheckpointArgs<'_>,
+) -> Option<ConversationCheckpoint> {
+    if let Ok(db) = Database::open(args.db_path)
+        && db
+            .session_has_checkpoint_for_message(args.chat_session_id, args.anchor_msg_id)
+            .unwrap_or(false)
+    {
+        return None;
+    }
+    create_turn_checkpoint(args).await
+}
+
 /// Read the user-configured checkpoint retention count from `app_settings`,
 /// clamping to the safe range. Falls back to the default on any read /
 /// parse error so a corrupted setting can't disable file snapshots entirely.
@@ -1148,5 +1164,33 @@ mod tests {
         let db = crate::db::Database::open(&db_path).unwrap();
         let row = db.latest_checkpoint("ws-1").unwrap().expect("row present");
         assert!(!row.has_file_state, "DB-derived value agrees with payload");
+    }
+
+    #[tokio::test]
+    async fn create_turn_checkpoint_unless_present_skips_duplicate_anchor() {
+        let (dir, db_path) = make_test_db().await;
+        let wt = make_empty_test_worktree(dir.path()).await;
+        let args = || CheckpointArgs {
+            db_path: &db_path,
+            workspace_id: "ws-1",
+            chat_session_id: "cs-1",
+            anchor_msg_id: "msg-abort",
+            worktree_path: wt.to_str().unwrap(),
+            created_at: "now".into(),
+            claude_session_id: None,
+        };
+        let first = create_turn_checkpoint_unless_present(args())
+            .await
+            .expect("first abort checkpoint");
+        assert!(
+            create_turn_checkpoint_unless_present(args())
+                .await
+                .is_none(),
+            "second create for the same message must no-op"
+        );
+        let db = crate::db::Database::open(&db_path).unwrap();
+        let listed = db.list_checkpoints_for_session("cs-1").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, first.id);
     }
 }

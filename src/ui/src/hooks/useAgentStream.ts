@@ -42,6 +42,7 @@ import {
   applyCommandLineEvent,
   approvalDetailValue,
   applyCompleteAssistantThinking,
+  activitiesForCheckpointSave,
   extractAssistantMessageParts,
   firstApprovalDetailString,
   initialToolInputJson,
@@ -1272,7 +1273,11 @@ export function useAgentStream() {
       // Persist tool activities for replay after app restart. Do not
       // loadChatHistory / setChatMessages — live chatMessages is the
       // transcript; live rows already use the DB id from block start.
-      const currentActivities = useAppStore.getState().toolActivities[sessionId] || [];
+      const state = useAppStore.getState();
+      const currentActivities = activitiesForCheckpointSave(
+        state.toolActivities[sessionId] || [],
+        state.completedTurns[sessionId] || [],
+      );
       debugChat("stream", "checkpoint-created", {
         sessionId,
         checkpointId: checkpoint.id,

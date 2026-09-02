@@ -124,6 +124,23 @@ impl Database {
         rows.collect()
     }
 
+    /// True when this session already has a checkpoint anchored on `message_id`.
+    /// Stop + ProcessExited both try to checkpoint the last live assistant
+    /// row; the second call must no-op so we don't emit two restore points.
+    pub fn session_has_checkpoint_for_message(
+        &self,
+        chat_session_id: &str,
+        message_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM conversation_checkpoints
+             WHERE chat_session_id = ?1 AND message_id = ?2",
+            params![chat_session_id, message_id],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Delete checkpoints for a session after a given turn index. Used for
     /// rollback — everything after the chosen turn is pruned.
     pub fn delete_session_checkpoints_after(
@@ -1725,6 +1742,25 @@ mod tests {
     }
 
     // --- Turn tool activity tests ---
+
+    #[test]
+    fn session_has_checkpoint_for_message_is_false_until_insert() {
+        // Abort-then-restart must still persist tools. The stop path creates a
+        // checkpoint on the last live assistant row; a second create for the
+        // same message (ProcessExited after Stop) must see the first one.
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+            .unwrap();
+        let sid = db
+            .default_session_id_for_workspace("w1")
+            .unwrap()
+            .expect("default session");
+        assert!(!db.session_has_checkpoint_for_message(&sid, "m1").unwrap());
+        db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
+            .unwrap();
+        assert!(db.session_has_checkpoint_for_message(&sid, "m1").unwrap());
+        assert!(!db.session_has_checkpoint_for_message(&sid, "other").unwrap());
+    }
 
     #[test]
     fn test_insert_and_list_tool_activities() {

@@ -9,6 +9,7 @@ import {
   mergeReloadedAssistantThinking,
   upsertPersistedMessageById,
   applyCompleteAssistantThinking,
+  activitiesForCheckpointSave,
   type CommandLineApplyDeps,
 } from "./useAgentStreamLogic";
 
@@ -303,5 +304,28 @@ describe("firstApprovalDetailString", () => {
         ["path", "filePath", "grantRoot"],
       ),
     ).toBeNull();
+  });
+});
+
+describe("activitiesForCheckpointSave", () => {
+  it("prefers live tool activities while the turn is still open", () => {
+    expect(
+      activitiesForCheckpointSave(
+        [{ toolUseId: "live" }],
+        [{ activities: [{ toolUseId: "done" }] }],
+      ),
+    ).toEqual([{ toolUseId: "live" }]);
+  });
+
+  it("falls back to the last completed turn after ProcessExited cleared live tools", () => {
+    expect(
+      activitiesForCheckpointSave(
+        [],
+        [
+          { activities: [{ toolUseId: "old" }] },
+          { activities: [{ toolUseId: "fastctx-1" }, { toolUseId: "fastctx-2" }] },
+        ],
+      ),
+    ).toEqual([{ toolUseId: "fastctx-1" }, { toolUseId: "fastctx-2" }]);
   });
 });

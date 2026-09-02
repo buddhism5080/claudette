@@ -17,7 +17,7 @@ use claudette::base64_decode;
 use claudette::chat::{
     BuildAssistantArgs, CheckpointArgs, RequestedFlags, SessionFlags, append_pending_thinking,
     assistant_usage_fields_from_result, build_compaction_sentinel, build_permission_response,
-    create_turn_checkpoint, extract_assistant_text, extract_event_thinking,
+    create_turn_checkpoint, create_turn_checkpoint_unless_present, extract_assistant_text, extract_event_thinking,
     persist_assistant_chat_message, persistent_session_flags_drifted,
 };
 use claudette::db::Database;
@@ -3382,6 +3382,31 @@ pub async fn send_chat_message(
 
                 drop(agents);
                 crate::tray::rebuild_tray(&app);
+                // User stop / crash never emit Result, so tools never got a
+                // checkpoint. Create one on the last live assistant (or user)
+                // row so restart can hydrate the tool cards. Stop may have
+                // already created this; unless_present de-dupes.
+                let anchor = last_assistant_msg_id
+                    .as_deref()
+                    .unwrap_or(&user_msg_id);
+                if let Some(cp) = create_turn_checkpoint_unless_present(CheckpointArgs {
+                    db_path: &db_path,
+                    workspace_id: &ws_id,
+                    chat_session_id: &chat_session_id_for_stream,
+                    anchor_msg_id: anchor,
+                    worktree_path: &wt_path,
+                    created_at: now_iso(),
+                    claude_session_id: ended_session_id.as_deref().filter(|s| !s.is_empty()),
+                })
+                .await
+                {
+                    let payload = serde_json::json!({
+                        "workspace_id": &ws_id,
+                        "chat_session_id": &chat_session_id_for_stream,
+                        "checkpoint": &cp,
+                    });
+                    let _ = app.emit("checkpoint-created", &payload);
+                }
             }
             // Fill rows opened at content_block_start. Insert only when the
             // CLI skipped partials so no live id exists yet.
@@ -3509,7 +3534,7 @@ pub async fn send_chat_message(
                         .filter(|s| !s.trim().is_empty())
                         .or_else(|| claude_sid_for_stream.clone())
                 };
-                if let Some(cp) = create_turn_checkpoint(CheckpointArgs {
+                if let Some(cp) = create_turn_checkpoint_unless_present(CheckpointArgs {
                     db_path: &db_path,
                     workspace_id: &ws_id,
                     chat_session_id: &chat_session_id_for_stream,

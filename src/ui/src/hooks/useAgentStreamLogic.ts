@@ -248,3 +248,13 @@ export function applyCompleteAssistantThinking<
   if (existing.trim()) return msgs;
   return msgs.map((msg, i) => (i === idx ? { ...msg, thinking } : msg));
 }
+
+/** Live tools first. After ProcessExited, finalizeTurn has already moved
+ *  them into completedTurns — still persist those on checkpoint-created. */
+export function activitiesForCheckpointSave<T>(
+  live: T[],
+  completedTurns: { activities: T[] }[],
+): T[] {
+  if (live.length > 0) return live;
+  return completedTurns.at(-1)?.activities ?? [];
+}

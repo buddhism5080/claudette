@@ -66,6 +66,19 @@ describe("ChatPanel.module.css invariants", () => {
 });
 
 describe("ThinkingBlock.module.css invariants", () => {
+  // Regression: boxed thinking sits as a direct flex child of `.messages`
+  // (`display: flex; flex-direction: column; overflow-y: auto`). The
+  // rounded-corner `overflow: hidden` implies `min-height: 0`, so as
+  // later rounds add more tool cards (which already pin flex-shrink: 0)
+  // the earlier thinking boxes shrink to a hairline. Same pairing as
+  // `.turnEditSummary` / `.banner`.
+  it("container pins flex-shrink: 0 so live thinking can't collapse as rounds accumulate", () => {
+    const css = readCss("ThinkingBlock.module.css");
+    const body = ruleBody(css, ".container");
+    expect(body).toMatch(/flex-shrink:\s*0\s*;/);
+    expect(body).toMatch(/overflow:\s*hidden\s*;/);
+  });
+
   // Regression: inline thinking (Brink Mode / grouping disabled) lives
   // inside the chat scroller. The default `.content` rule caps the
   // box at 400px and adds an inner scrollbar; inline must not nest a

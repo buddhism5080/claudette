@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 use claudette::agent::{self, AgentSession};
+use claudette::chat::{CheckpointArgs, create_turn_checkpoint_unless_present};
 use claudette::db::Database;
 use claudette::model::{ChatMessage, ChatRole};
 
@@ -111,6 +112,40 @@ pub async fn stop_agent(
 
     crate::tray::rebuild_tray(&app);
 
+    // Checkpoint the last live row BEFORE inserting "Agent stopped" so
+    // tools hydrate above that system message. ProcessExited may also
+    // try; unless_present de-dupes.
+    if let Some(anchor) = db
+        .last_chat_message_id_for_session(&chat_session_id)
+        .ok()
+        .flatten()
+    {
+        let workspaces = db.list_workspaces().unwrap_or_default();
+        let wt = workspaces
+            .iter()
+            .find(|w| w.id == workspace_id)
+            .and_then(|w| w.worktree_path.clone())
+            .unwrap_or_default();
+        if let Some(cp) = create_turn_checkpoint_unless_present(CheckpointArgs {
+            db_path: &state.db_path,
+            workspace_id: &workspace_id,
+            chat_session_id: &chat_session_id,
+            anchor_msg_id: &anchor,
+            worktree_path: &wt,
+            created_at: now_iso(),
+            claude_session_id: ended_sid.as_deref().filter(|s| !s.is_empty()),
+        })
+        .await
+        {
+            let payload = serde_json::json!({
+                "workspace_id": &workspace_id,
+                "chat_session_id": &chat_session_id,
+                "checkpoint": &cp,
+            });
+            let _ = app.emit("checkpoint-created", &payload);
+        }
+    }
+
     // Log stop message on this chat session.
     let msg = ChatMessage {
         id: uuid::Uuid::new_v4().to_string(),
@@ -128,6 +163,7 @@ pub async fn stop_agent(
         cache_creation_tokens: None,
     };
     db.insert_chat_message(&msg).map_err(|e| e.to_string())?;
+    let _ = app.emit("chat-message", &msg);
 
     Ok(())
 }

@@ -2,6 +2,11 @@
   border: 1px solid var(--divider);
   border-radius: 6px;
   margin: 4px 0;
+  /* `.messages` is a flex column with overflow-y: auto. overflow: hidden
+   * for rounded corners implies min-height: 0, so later tool cards
+   * (flex-shrink: 0) squeeze earlier thinking boxes into a hairline.
+   * Same pairing as `.turnEditSummary` / `.banner`. */
+  flex-shrink: 0;
   overflow: hidden;
   transition: border-color var(--transition-fast);
 }
