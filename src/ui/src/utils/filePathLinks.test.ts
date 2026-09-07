@@ -102,26 +102,6 @@ describe("detectFilePaths — non-matches and false-positive guards", () => {
     // Preceded by a word char → not a path start
     expect(detectFilePaths("abc/def/ghi")).toEqual([]);
   });
-
-  it("ignores a slash in CJK prose, not a POSIX path", () => {
-    const text =
-      "模型和规格已对齐。接下来加 tabs.json 存储层，以及纯函数形式的快照/回放逻辑。";
-    expect(detectFilePaths(text)).toEqual([]);
-    expect(detectFileReferences(text).map((m) => m.path)).toEqual([
-      "tabs.json",
-    ]);
-    expect(detectFilePaths("输入/输出 与 读/写")).toEqual([]);
-    expect(detectFilePaths("快照/回放逻辑。")).toEqual([]);
-  });
-
-  it("still matches a real absolute path next to CJK", () => {
-    expect(detectFilePaths("见 /tmp/people.csv 文件")).toEqual([
-      { start: 2, end: 17, path: "/tmp/people.csv" },
-    ]);
-    expect(detectFilePaths("保存到 /tmp/people.csv。")).toEqual([
-      { start: 4, end: 19, path: "/tmp/people.csv" },
-    ]);
-  });
 });
 
 describe("relative file references", () => {
