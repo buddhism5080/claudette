@@ -1403,6 +1403,37 @@ describe("MessagesWithTurns live stream order", () => {
     expect(container.textContent).toContain("Now I can patch it.");
   });
 
+  it("collapses earlier thinking during a live turn even when the Eye chip is on", async () => {
+    const first = message("asst-1", "Assistant", "");
+    first.thinking = "I will read the file first.";
+    const second = message("asst-2", "Assistant", "");
+    second.thinking = "Now I can patch it.";
+    useAppStore.setState({
+      showThinkingBlocks: { [SESSION_ID]: true },
+      liveAssistantMessageId: { [SESSION_ID]: "asst-2" },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "Fix the bug"), first, second]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    const toggles = [
+      ...container.querySelectorAll("button[aria-expanded]"),
+    ] as HTMLButtonElement[];
+    expect(toggles).toHaveLength(2);
+    expect(toggles[0]?.getAttribute("aria-expanded")).toBe("false");
+    expect(toggles[1]?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).not.toContain("I will read the file first.");
+    expect(container.textContent).toContain("Now I can patch it.");
+  });
+
   it("does not keep historical thinking expanded just because a later turn is running", async () => {
     const prior = message("assistant-1", "Assistant", "Done.");
     prior.thinking = "Old reasoning from the previous turn.";
