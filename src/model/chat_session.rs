@@ -66,6 +66,38 @@ impl AttentionKind {
 /// share the same bound.
 pub const SESSION_NAME_MAX_CHARS: usize = 60;
 
+/// Default tab title written when a chat session is created. The Haiku
+/// auto-namer (and the local prompt fallback) replace this on the first
+/// turn unless the user already renamed the tab.
+pub const DEFAULT_SESSION_NAME: &str = "New chat";
+
+/// `true` when the tab still has the placeholder title (or is blank).
+pub fn is_placeholder_session_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.is_empty() || trimmed == DEFAULT_SESSION_NAME
+}
+
+/// Whether Claudette should still try to auto-name this tab.
+///
+/// Independent of `turn_count`: a first-turn abort used to consume the
+/// one-shot (`turn_count` already 2 on retry) and leave the tab stuck on
+/// `New chat` forever. Keep retrying until the user edits the name or a
+/// generated title lands.
+pub fn should_attempt_session_auto_name(name_edited: bool, name: &str) -> bool {
+    !name_edited && is_placeholder_session_name(name)
+}
+
+/// Local fallback when Haiku is unavailable. Collapses whitespace and
+/// caps at [`SESSION_NAME_MAX_CHARS`] so the tab is identifiable even if
+/// the background `claude --print` naming call fails.
+pub fn fallback_session_name(prompt: &str) -> String {
+    let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return DEFAULT_SESSION_NAME.to_string();
+    }
+    collapsed.chars().take(SESSION_NAME_MAX_CHARS).collect()
+}
+
 /// Normalize a user-supplied session name. Trims surrounding whitespace,
 /// rejects the empty string, and caps at `SESSION_NAME_MAX_CHARS`
 /// characters (not bytes) so we can't split a multi-byte codepoint.
@@ -107,4 +139,39 @@ pub struct ChatSession {
     pub needs_attention: bool,
     /// Runtime attention kind — defaults to `None` from DB.
     pub attention_kind: Option<AttentionKind>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_name_matches_default_and_blank() {
+        assert!(is_placeholder_session_name("New chat"));
+        assert!(is_placeholder_session_name("  New chat  "));
+        assert!(is_placeholder_session_name(""));
+        assert!(is_placeholder_session_name("   "));
+        assert!(!is_placeholder_session_name("Auth flow refactor"));
+    }
+
+    #[test]
+    fn auto_name_retries_placeholder_even_after_later_turns() {
+        assert!(should_attempt_session_auto_name(false, "New chat"));
+        assert!(!should_attempt_session_auto_name(true, "New chat"));
+        assert!(!should_attempt_session_auto_name(
+            false,
+            "Auth flow refactor"
+        ));
+    }
+
+    #[test]
+    fn fallback_session_name_collapses_whitespace_and_caps() {
+        assert_eq!(fallback_session_name("  look   this\nup  "), "look this up");
+        assert_eq!(fallback_session_name("   \n"), DEFAULT_SESSION_NAME);
+        let long = "x".repeat(SESSION_NAME_MAX_CHARS + 10);
+        assert_eq!(
+            fallback_session_name(&long).chars().count(),
+            SESSION_NAME_MAX_CHARS
+        );
+    }
 }

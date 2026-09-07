@@ -166,7 +166,11 @@ pub(crate) async fn try_generate_session_name(
                 error = %e,
                 "session auto-name: generate_session_name failed",
             );
-            return;
+            let fallback = claudette::model::fallback_session_name(prompt);
+            if claudette::model::is_placeholder_session_name(&fallback) {
+                return;
+            }
+            fallback
         }
     };
 

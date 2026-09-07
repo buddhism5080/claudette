@@ -246,7 +246,7 @@ fn remote_control_title(
     messages: &[ChatMessage],
 ) -> String {
     let name = chat_session.name.trim();
-    if !name.is_empty() && name != "New chat" {
+    if !claudette::model::is_placeholder_session_name(name) {
         return name.to_string();
     }
     if let Some(first_user_text) = first_user_message_text(messages) {

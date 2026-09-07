@@ -23,7 +23,10 @@ use claudette::chat::{
 use claudette::db::Database;
 use claudette::env::WorkspaceEnv;
 use claudette::mcp_supervisor::McpSupervisor;
-use claudette::model::{ChatMessage, ChatRole, TurnToolActivity};
+use claudette::model::{
+    ChatMessage, ChatRole, TurnToolActivity, fallback_session_name, is_placeholder_session_name,
+    should_attempt_session_auto_name,
+};
 use claudette::permissions::tools_for_level;
 
 use crate::state::{
@@ -435,7 +438,7 @@ fn remote_control_title(
     messages: &[ChatMessage],
 ) -> String {
     let session_name = session_name.trim();
-    if !session_name.is_empty() && session_name != "New chat" {
+    if !is_placeholder_session_name(session_name) {
         return session_name.to_string();
     }
     if let Some(first_user_text) = first_user_message_text(messages) {
@@ -2467,7 +2470,6 @@ pub async fn send_chat_message(
     let has_repo = repo.is_some();
     let rename_old_branch = ws.branch_name.clone();
     let rename_old_name = ws.name.clone();
-    let rename_prompt = content.clone();
     let rename_prefs = repo
         .as_ref()
         .and_then(|r| r.branch_rename_preferences.clone());
@@ -2476,6 +2478,25 @@ pub async fn send_chat_message(
     let remote_control_title_messages = db
         .list_chat_messages_for_session(&chat_session_id)
         .unwrap_or_default();
+    let rename_prompt = first_user_message_text(&remote_control_title_messages)
+        .unwrap_or_else(|| content.clone());
+
+    // Name the tab immediately from the first user prompt so a Haiku
+    // failure (or a first-turn abort that used to consume the one-shot)
+    // cannot leave the UI stuck on "New chat". Haiku may still overwrite
+    // this later because `name_edited` stays 0.
+    if should_attempt_session_auto_name(session_name_already_edited, &chat_session.name) {
+        let fallback = fallback_session_name(&rename_prompt);
+        if fallback != chat_session.name
+            && let Ok(true) = db.set_session_name_from_haiku(&chat_session_id, &fallback)
+        {
+            let payload = serde_json::json!({
+                "session_id": chat_session_id,
+                "name": fallback,
+            });
+            let _ = app.emit("session-renamed", &payload);
+        }
+    }
     let mut remote_control_reenable_after_result =
         if should_reenable_remote_control && let Some(ps) = ps_for_remote_control_reenable {
             Some((
@@ -2557,11 +2578,10 @@ pub async fn send_chat_message(
         }
 
         // Also spawn a background task to generate a human-readable session
-        // name for the tab. Fires on every new session's first turn (not just
-        // the first session of the workspace). Skipped if the user already
-        // renamed the session manually.
-        if saved_turn_count <= 1
-            && !session_name_already_edited
+        // name for the tab. Retries while the tab is still the placeholder
+        // (a first-turn abort used to skip forever once turn_count > 1).
+        // Skipped if the user already renamed the session manually.
+        if should_attempt_session_auto_name(session_name_already_edited, &chat_session.name)
             && should_run_auto_naming(remote_control_active_for_turn)
         {
             let sid2 = chat_session_id_for_stream.clone();
