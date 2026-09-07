@@ -1811,36 +1811,11 @@ pub fn spawn_repo_env_warmup(app: AppHandle, repo_id: String) {
 pub struct HostEnvFlags {
     pub disable_1m_context: bool,
     pub alternative_backends_compiled: bool,
-    /// Token cap from `CLAUDE_CODE_CONTEXT_LIMIT`, else
-    /// `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. Overrides the model registry
-    /// window on the context meter.
+    /// Token cap from Claude Code `settings.json` `env` (`CLAUDE_CODE_CONTEXT_LIMIT`
+    /// or `CLAUDE_CODE_MAX_CONTEXT_TOKENS`), else the same names in the
+    /// host process environment. Overrides the model registry window on
+    /// the context meter.
     pub context_limit_tokens: Option<u64>,
-}
-
-/// Parse a positive token count. Accepts plain digits, `_` separators, and
-/// scientific notation (`1e6`).
-pub(crate) fn parse_positive_token_count(raw: &str) -> Option<u64> {
-    let s = raw.trim().replace('_', "");
-    if s.is_empty() {
-        return None;
-    }
-    if let Ok(n) = s.parse::<u64>() {
-        return (n > 0).then_some(n);
-    }
-    let f: f64 = s.parse().ok()?;
-    if !f.is_finite() || f <= 0.0 || f != f.trunc() || f > u64::MAX as f64 {
-        return None;
-    }
-    Some(f as u64)
-}
-
-pub(crate) fn parse_context_limit_from_vars(
-    context_limit: Option<&str>,
-    max_context_tokens: Option<&str>,
-) -> Option<u64> {
-    context_limit
-        .and_then(parse_positive_token_count)
-        .or_else(|| max_context_tokens.and_then(parse_positive_token_count))
 }
 
 /// Return environment-derived flags from the host process. Unlike app
@@ -1853,9 +1828,10 @@ pub fn get_host_env_flags() -> HostEnvFlags {
     HostEnvFlags {
         disable_1m_context: std::env::var("CLAUDE_CODE_DISABLE_1M_CONTEXT").is_ok(),
         alternative_backends_compiled: cfg!(feature = "alternative-backends"),
-        context_limit_tokens: parse_context_limit_from_vars(
+        context_limit_tokens: claudette::claude_context_limit::resolve_context_limit_tokens(
             context_limit.as_deref(),
             max_context.as_deref(),
+            claudette::claude_context_limit::load_context_limit_from_claude_settings(None),
         ),
     }
 }
@@ -1876,29 +1852,6 @@ mod tests {
             evaluated_at: SystemTime::now(),
             error: None,
         }
-    }
-
-    #[test]
-    fn parse_positive_token_count_accepts_digits_underscores_and_scientific() {
-        assert_eq!(parse_positive_token_count("200000"), Some(200_000));
-        assert_eq!(parse_positive_token_count("200_000"), Some(200_000));
-        assert_eq!(parse_positive_token_count(" 1e6 "), Some(1_000_000));
-        assert_eq!(parse_positive_token_count("0"), None);
-        assert_eq!(parse_positive_token_count(""), None);
-        assert_eq!(parse_positive_token_count("nope"), None);
-    }
-
-    #[test]
-    fn parse_context_limit_prefers_context_limit_over_max_context_tokens() {
-        assert_eq!(
-            parse_context_limit_from_vars(Some("200000"), Some("1000000")),
-            Some(200_000)
-        );
-        assert_eq!(
-            parse_context_limit_from_vars(None, Some("1e6")),
-            Some(1_000_000)
-        );
-        assert_eq!(parse_context_limit_from_vars(None, None), None);
     }
 
     #[test]

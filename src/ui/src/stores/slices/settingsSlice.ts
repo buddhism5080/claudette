@@ -78,9 +78,10 @@ export interface SettingsSlice {
   setClaudetteMcpEnabled: (enabled: boolean) => void;
   disable1mContext: boolean;
   setDisable1mContext: (v: boolean) => void;
-  /** Positive token cap from CLAUDE_CODE_CONTEXT_LIMIT or
-   *  CLAUDE_CODE_MAX_CONTEXT_TOKENS. Null when unset. Overrides the
-   *  model registry / runtime window on the context meter. */
+  /** Positive token cap from Claude Code settings.json env
+   *  (CLAUDE_CODE_CONTEXT_LIMIT / CLAUDE_CODE_MAX_CONTEXT_TOKENS) or the
+   *  host process. Null when unset. Overrides the model registry /
+   *  runtime window on the context meter. */
   contextLimitTokens: number | null;
   setContextLimitTokens: (v: number | null) => void;
   alternativeBackendsAvailable: boolean;

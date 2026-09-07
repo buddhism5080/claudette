@@ -6,6 +6,7 @@ pub mod audio;
 pub mod cesp;
 pub mod chat;
 pub mod checkpoint_backfill;
+pub mod claude_context_limit;
 pub mod claude_flags_store;
 pub mod claude_help;
 pub mod community;
