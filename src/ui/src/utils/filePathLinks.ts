@@ -8,6 +8,7 @@
  *
  * Recognized:
  *  - POSIX absolute      `/tmp/foo.csv`, `/Users/.../bar.png`
+ *    (first segment after `/` must be ASCII, so `快照/回放` is not a path)
  *  - POSIX home          `~/Downloads/foo.csv`
  *  - Windows drive       `C:\Users\foo\bar.csv`, `C:/Users/foo/bar.csv`
  *  - Windows UNC         `\\server\share\file.txt`
@@ -81,7 +82,7 @@ function isForbiddenPreviousChar(char: string): boolean {
  * match. Backticks are included so a path written like `` `…` `` doesn't
  * absorb the closing backtick when it appears inside inline-code-adjacent
  * prose. */
-const TRAILING_PUNCT_REGEX = /[.,;:!?)\]'"`]+$/;
+const TRAILING_PUNCT_REGEX = /[.,;:!?)\]'"`。．、，！？；：）】》」』…]+$/u;
 
 /** Minimum-length heuristic for detected paths after trailing punctuation
  *  is stripped. This filters out very short matches like `/a` (which are
@@ -89,6 +90,20 @@ const TRAILING_PUNCT_REGEX = /[.,;:!?)\]'"`]+$/;
  *  enforcing the presence of an additional inner separator — that would
  *  reject legitimate two-segment paths like `/etc` or `~/foo`. */
 const MIN_PATH_LENGTH = 3;
+
+/**
+ * POSIX `/foo` and `~/foo` autolinks require an ASCII first segment.
+ * Otherwise `快照/回放逻辑` is treated as the absolute path `/回放逻辑`.
+ * Drive-letter and UNC matches skip this — they already start with ASCII.
+ */
+function hasAsciiPathRootSegment(path: string): boolean {
+  let rest = path;
+  if (rest.startsWith("~/")) rest = rest.slice(2);
+  else if (rest.startsWith("/")) rest = rest.slice(1);
+  else return true;
+  const first = rest.split(/[\\/]/)[0] ?? "";
+  return /^[A-Za-z0-9._-]+$/.test(first);
+}
 
 const COMMON_HOSTLIKE_EXTENSIONS = new Set([
   "app",
@@ -208,6 +223,7 @@ export function detectFilePaths(text: string): FilePathMatch[] {
     const raw = m[0];
     const stripped = raw.replace(TRAILING_PUNCT_REGEX, "");
     if (stripped.length < MIN_PATH_LENGTH) continue;
+    if (!hasAsciiPathRootSegment(stripped)) continue;
     matches.push({
       start: m.index,
       end: m.index + stripped.length,
