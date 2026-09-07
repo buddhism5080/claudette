@@ -1568,11 +1568,18 @@ fn shutdown_runtime_handler(_app: &tauri::AppHandle, _event: tauri::RunEvent) {
             // Navigate to session needing attention, if any.
             tray::navigate_to_attention(_app);
         }
+        tauri::RunEvent::ExitRequested { .. } => {
+            // Unregister the tray while the Win32/AppKit loop is still
+            // alive. Waiting until AppState drop is too late on Windows:
+            // NIM_DELETE never lands and the icon stays in the tray.
+            tray::destroy_tray_on_exit(_app);
+        }
         // Kill the embedded server process (if we spawned one) before
         // the tokio runtime tears down. Using synchronous POSIX kill
         // ensures the child is dead before our process exits, preventing
         // the "Address already in use" error on next launch.
         tauri::RunEvent::Exit => {
+            tray::destroy_tray_on_exit(_app);
             let app_state = _app.state::<state::AppState>();
             state::APP_SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
 

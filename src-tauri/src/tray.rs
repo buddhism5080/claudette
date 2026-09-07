@@ -507,22 +507,48 @@ pub fn notify_attention(app: &AppHandle, workspace_id: &str, kind: AttentionKind
 /// Must dispatch to the main thread — macOS requires NSStatusItem
 /// removal on the main run loop.
 pub fn destroy_tray(app: &AppHandle) {
+    destroy_tray_impl(app, false);
+}
+
+/// Unregister the tray **on this thread** before the event loop dies.
+///
+/// `destroy_tray` posts `remove_tray_by_id` via `run_on_main_thread`.
+/// `RunEvent::Exit` never flushes that queue, so Windows never gets
+/// `NIM_DELETE` and the icon stays in the notification area until the
+/// user hovers it. Call this from `ExitRequested` / `Exit`.
+pub fn destroy_tray_on_exit(app: &AppHandle) {
+    destroy_tray_impl(app, true);
+}
+
+fn take_tray_id(state: &AppState) -> Option<String> {
+    state
+        .tray_handle
+        .lock()
+        .ok()
+        .and_then(|mut g| {
+            let tray = g.take()?;
+            let id = tray.id().as_ref().to_string();
+            let _ = tray.set_visible(false);
+            Some(id)
+        })
+}
+
+fn destroy_tray_impl(app: &AppHandle, immediate: bool) {
     let state = app.state::<AppState>();
     // Read the id off the current handle before dropping it so the
     // subsequent remove_tray_by_id call matches the actual registered
     // tray. IDs are now unique per creation (see setup_tray).
-    let tray_id: Option<String> = state
-        .tray_handle
-        .lock()
-        .ok()
-        .and_then(|mut g| g.take().map(|t| t.id().as_ref().to_string()));
-
-    if let Some(id) = tray_id {
-        let handle = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            let _ = handle.remove_tray_by_id(&id);
-        });
+    let Some(id) = take_tray_id(&state) else {
+        return;
+    };
+    if immediate {
+        let _ = app.remove_tray_by_id(&id);
+        return;
     }
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = handle.remove_tray_by_id(&id);
+    });
 }
 
 /// Determine the overall tray state from all agent sessions.
@@ -1268,5 +1294,19 @@ mod tests {
             NotificationEvent::Finished,
         );
         assert_eq!(resolved, "Default");
+    }
+
+    #[test]
+    fn exit_handler_unregisters_tray_before_event_loop_dies() {
+        let main = include_str!("main.rs");
+        assert!(
+            main.contains("ExitRequested") && main.contains("tray::destroy_tray_on_exit"),
+            "ExitRequested must call destroy_tray_on_exit so Windows gets NIM_DELETE"
+        );
+        let tray = include_str!("tray.rs");
+        assert!(
+            tray.contains("destroy_tray_impl(app, true)"),
+            "destroy_tray_on_exit must remove the tray on this thread, not run_on_main_thread"
+        );
     }
 }
