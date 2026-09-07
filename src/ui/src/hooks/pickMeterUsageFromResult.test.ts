@@ -48,7 +48,41 @@ describe("pickMeterUsageFromResult", () => {
     });
   });
 
-  it("falls back to the top-level aggregate when iterations is absent", () => {
+  it("uses the last iteration when the CLI lists more than one", () => {
+    const usage = pickMeterUsageFromResult(
+      make({
+        input_tokens: 62,
+        output_tokens: 41_322,
+        cache_read_input_tokens: 4_695_413,
+        iterations: [
+          {
+            total_tokens: 10_000,
+            input_tokens: 1,
+            output_tokens: 10,
+            cache_read_input_tokens: 9_000,
+          },
+          {
+            total_tokens: 133_074,
+            input_tokens: 2,
+            output_tokens: 611,
+            cache_read_input_tokens: 131_890,
+            cache_creation_input_tokens: 573,
+            model_context_window: 272_000,
+          },
+        ],
+      }),
+    );
+    expect(usage).toEqual({
+      totalTokens: 133_074,
+      inputTokens: 2,
+      outputTokens: 611,
+      cacheReadTokens: 131_890,
+      cacheCreationTokens: 573,
+      modelContextWindow: 272_000,
+    });
+  });
+
+  it("uses the top-level usage when Codex reports a runtime window and no iterations", () => {
     const usage = pickMeterUsageFromResult(
       make({
         total_tokens: 5_300,
@@ -68,16 +102,29 @@ describe("pickMeterUsageFromResult", () => {
     });
   });
 
-  it("falls back to the aggregate when iterations is an empty array", () => {
-    const usage = pickMeterUsageFromResult(
-      make({
-        input_tokens: 100,
-        output_tokens: 200,
-        iterations: [],
-      }),
-    );
-    expect(usage?.inputTokens).toBe(100);
-    expect(usage?.outputTokens).toBe(200);
+  it("does not use the Claude aggregate when iterations are missing (keep live occupancy)", () => {
+    expect(
+      pickMeterUsageFromResult(
+        make({
+          input_tokens: 62,
+          output_tokens: 41_322,
+          cache_creation_input_tokens: 153_239,
+          cache_read_input_tokens: 4_695_413,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("does not use an empty iterations array as the Claude aggregate", () => {
+    expect(
+      pickMeterUsageFromResult(
+        make({
+          input_tokens: 100,
+          output_tokens: 200,
+          iterations: [],
+        }),
+      ),
+    ).toBeNull();
   });
 
   it("treats null cache fields as undefined", () => {

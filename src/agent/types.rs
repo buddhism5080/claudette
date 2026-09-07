@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 /// On `result` events the top-level fields are AGGREGATED across internal
 /// tool-use iterations. For the final iteration's per-call usage (what the
 /// ContextMeter needs to reflect actual end-of-turn context size), use
-/// `iterations[0]` — the CLI emits a single-entry array with the final
-/// iteration's own usage block.
+/// `iterations.last()` — the last entry is the final call. A single-entry
+/// array is the common Claude CLI shape.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TokenUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]

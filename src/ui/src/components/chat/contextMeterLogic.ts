@@ -37,14 +37,19 @@ export function bandForRatio(ratio: number): Band {
 export function computeMeterState(
   usage: TurnUsage | undefined,
   capacity: number | undefined,
+  envLimit?: number,
 ): MeterState | null {
   if (!usage) return null;
   if (!Number.isFinite(usage.inputTokens)) return null;
   if (!Number.isFinite(usage.outputTokens)) return null;
+  const envCapacity =
+    Number.isFinite(envLimit) && (envLimit as number) > 0
+      ? (envLimit as number)
+      : undefined;
   const runtimeCapacity = Number.isFinite(usage.modelContextWindow)
     ? usage.modelContextWindow
     : undefined;
-  const resolvedCapacity = runtimeCapacity ?? capacity;
+  const resolvedCapacity = envCapacity ?? runtimeCapacity ?? capacity;
   if (!Number.isFinite(resolvedCapacity) || (resolvedCapacity as number) <= 0) return null;
 
   const cap = resolvedCapacity as number;

@@ -34,9 +34,10 @@ function fillClassForBand(band: Band): string {
  */
 export function ContextMeter({ sessionId }: ContextMeterProps) {
   const usage = useAppStore((s) => s.latestTurnUsage[sessionId]);
+  const envLimit = useAppStore((s) => s.contextLimitTokens);
 
   const model = useSelectedModelEntry(sessionId);
-  const state = computeMeterState(usage, model?.contextWindowTokens);
+  const state = computeMeterState(usage, model?.contextWindowTokens, envLimit ?? undefined);
   if (!state) return null;
 
   const tooltip = buildMeterTooltip(state);

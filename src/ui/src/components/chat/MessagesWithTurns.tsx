@@ -180,6 +180,12 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
   const liveAssistantMessageId = useAppStore(
     (s) => s.liveAssistantMessageId[sessionId] ?? null,
   );
+  const lastUserIndex = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.role === "User") return i;
+    }
+    return -1;
+  }, [messages]);
   const resolvedClaudeAuthFailureMessageId = useAppStore(
     (s) => s.resolvedClaudeAuthFailureMessageId,
   );
@@ -983,8 +989,9 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
 
         // Default rendering for User, Assistant, and non-sentinel System messages.
         // Assistant thinking is hoisted above tools at this position so API
-        // order is preserved. Always mount when the message carries thinking —
-        // the Eye chip only controls default-expanded vs collapsed.
+        // order is preserved. Eye shows/hides the block after the turn; it
+        // does not default-expand. In-flight and open-turn thinking stay
+        // mounted so a tool cannot make the header vanish.
         const liveId = liveAssistantMessageId;
         // Only the live thinking row auto-expands. A later tool/text/thinking
         // block seals liveId, so the previous thinking collapses instead of
@@ -994,12 +1001,17 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
           liveId === msg.id &&
           msg.thinking != null &&
           !msg.content;
+        const inOpenTurn = isRunning && idx > lastUserIndex;
+        const showThinking =
+          thinkingStreaming || showThinkingBlocks || inOpenTurn;
         const assistantThinking =
-          msg.role === "Assistant" && msg.thinking != null ? (
+          msg.role === "Assistant" &&
+          msg.thinking != null &&
+          showThinking ? (
             <ThinkingBlock
               content={msg.thinking}
               isStreaming={thinkingStreaming}
-              defaultExpanded={showThinkingBlocks && !isRunning}
+              defaultExpanded={false}
               inline={toolDisplayMode === "inline"}
               searchQuery={searchQuery}
             />

@@ -139,6 +139,32 @@ describe("computeMeterState", () => {
     expect(state!.cacheCreation).toBe(1_250);
   });
 
+  it("lets an env context limit override runtime and registry capacity", () => {
+    const turn = {
+      ...makeTurn({
+        inputTokens: 100_000,
+        outputTokens: 36_000,
+      }),
+      modelContextWindow: 1_000_000,
+    };
+    const state = computeMeterState(turn, 1_000_000, 200_000);
+    expect(state).not.toBeNull();
+    expect(state!.capacity).toBe(200_000);
+    expect(state!.percentRounded).toBe(68);
+  });
+
+  it("ignores a non-positive env context limit", () => {
+    const turn = {
+      ...makeTurn({
+        inputTokens: 100_000,
+        outputTokens: 36_000,
+      }),
+      modelContextWindow: 272_000,
+    };
+    expect(computeMeterState(turn, 400_000, 0)!.capacity).toBe(272_000);
+    expect(computeMeterState(turn, 400_000, Number.NaN)!.capacity).toBe(272_000);
+  });
+
   it("prefers runtime model context window from usage over registry capacity", () => {
     const turn = {
       ...makeTurn({

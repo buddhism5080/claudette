@@ -30,9 +30,10 @@ const SEGMENT_COLORS = [
 export function ContextPopover({ sessionId, onClose, onCompact, onClear, triggerRef }: ContextPopoverProps) {
   const popoverRef = useRef<HTMLDivElement>(null);
   const usage = useAppStore((s) => s.latestTurnUsage[sessionId]);
+  const envLimit = useAppStore((s) => s.contextLimitTokens);
 
   const model = useSelectedModelEntry(sessionId);
-  const state = computeMeterState(usage, model?.contextWindowTokens);
+  const state = computeMeterState(usage, model?.contextWindowTokens, envLimit ?? undefined);
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {

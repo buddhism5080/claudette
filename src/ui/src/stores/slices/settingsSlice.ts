@@ -78,6 +78,11 @@ export interface SettingsSlice {
   setClaudetteMcpEnabled: (enabled: boolean) => void;
   disable1mContext: boolean;
   setDisable1mContext: (v: boolean) => void;
+  /** Positive token cap from CLAUDE_CODE_CONTEXT_LIMIT or
+   *  CLAUDE_CODE_MAX_CONTEXT_TOKENS. Null when unset. Overrides the
+   *  model registry / runtime window on the context meter. */
+  contextLimitTokens: number | null;
+  setContextLimitTokens: (v: number | null) => void;
   alternativeBackendsAvailable: boolean;
   setAlternativeBackendsAvailable: (available: boolean) => void;
   alternativeBackendsEnabled: boolean;
@@ -202,6 +207,8 @@ export const createSettingsSlice: StateCreator<
   setClaudetteMcpEnabled: (enabled) => set({ claudetteMcpEnabled: enabled }),
   disable1mContext: false,
   setDisable1mContext: (v) => set({ disable1mContext: v }),
+  contextLimitTokens: null,
+  setContextLimitTokens: (v) => set({ contextLimitTokens: v }),
   alternativeBackendsAvailable: false,
   setAlternativeBackendsAvailable: (available) =>
     set((state) => ({

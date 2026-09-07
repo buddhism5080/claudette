@@ -127,7 +127,7 @@ try {
         case "plugin:app|version":
           return "0.0.0-smoke";
         case "get_host_env_flags":
-          return { alternative_backends_compiled: false, disable_1m_context: false };
+          return { alternative_backends_compiled: false, disable_1m_context: false, context_limit_tokens: null };
         case "list_agent_backends":
           return { backends: [], default_backend_id: "anthropic" };
         case "list_remote_connections":

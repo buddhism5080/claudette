@@ -222,10 +222,10 @@ pub struct AssistantUsageFields {
 /// `result.usage` top-level fields are aggregates across internal tool-use
 /// iterations. Persisting those into `chat_messages` makes reload hydration
 /// over-report context until the live stream corrects it. When the CLI includes
-/// `iterations`, the first entry is the final API call's usage and matches what
+/// `iterations`, the last entry is the final API call's usage and matches what
 /// the live ContextMeter uses.
 pub fn assistant_usage_fields_from_result(usage: &TokenUsage) -> AssistantUsageFields {
-    if let Some(iteration) = usage.iterations.as_ref().and_then(|items| items.first()) {
+    if let Some(iteration) = usage.iterations.as_ref().and_then(|items| items.last()) {
         return AssistantUsageFields {
             input_tokens: iteration.input_tokens,
             output_tokens: iteration.output_tokens,
@@ -1016,6 +1016,42 @@ mod tests {
 
         let fields = assistant_usage_fields_from_result(&usage);
         assert_eq!(fields.input_tokens, 1);
+        assert_eq!(fields.output_tokens, 611);
+        assert_eq!(fields.cache_creation_input_tokens, Some(573));
+        assert_eq!(fields.cache_read_input_tokens, Some(131_890));
+    }
+
+    #[test]
+    fn assistant_usage_fields_from_result_prefers_last_iteration() {
+        let usage = TokenUsage {
+            total_tokens: None,
+            input_tokens: 62,
+            output_tokens: 41_322,
+            cache_creation_input_tokens: Some(153_239),
+            cache_read_input_tokens: Some(4_695_413),
+            model_context_window: Some(272_000),
+            iterations: Some(vec![
+                TokenUsageIteration {
+                    total_tokens: None,
+                    input_tokens: 1,
+                    output_tokens: 10,
+                    cache_creation_input_tokens: Some(9),
+                    cache_read_input_tokens: Some(9_000),
+                    model_context_window: Some(272_000),
+                },
+                TokenUsageIteration {
+                    total_tokens: None,
+                    input_tokens: 2,
+                    output_tokens: 611,
+                    cache_creation_input_tokens: Some(573),
+                    cache_read_input_tokens: Some(131_890),
+                    model_context_window: Some(272_000),
+                },
+            ]),
+        };
+
+        let fields = assistant_usage_fields_from_result(&usage);
+        assert_eq!(fields.input_tokens, 2);
         assert_eq!(fields.output_tokens, 611);
         assert_eq!(fields.cache_creation_input_tokens, Some(573));
         assert_eq!(fields.cache_read_input_tokens, Some(131_890));

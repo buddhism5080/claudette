@@ -195,7 +195,7 @@ describe("MessagesWithTurns edit summaries", () => {
     expect(thinkingToggle?.textContent).toContain("Thinking");
   });
 
-  it("still renders persisted thinking when the Eye chip is off", async () => {
+  it("hides persisted thinking when the Eye chip is off after the turn", async () => {
     const assistant = message("assistant-1", "Assistant", "Done.");
     assistant.thinking = "I should check the existing renderer first.";
     useAppStore.setState({
@@ -213,7 +213,39 @@ describe("MessagesWithTurns edit summaries", () => {
       />,
     );
 
+    expect(container.textContent).not.toContain("Thinking");
+    expect(container.textContent).not.toContain(
+      "I should check the existing renderer first.",
+    );
+    expect(container.textContent).toContain("Done.");
+  });
+
+  it("keeps thinking collapsed after the turn even when the Eye chip is on", async () => {
+    const assistant = message("assistant-1", "Assistant", "Done.");
+    assistant.thinking = "I should check the existing renderer first.";
+    useAppStore.setState({
+      showThinkingBlocks: { [SESSION_ID]: true },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "Update it"), assistant]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning={false}
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    const thinkingToggle = container.querySelector(
+      "button[aria-expanded]",
+    ) as HTMLButtonElement | null;
+    expect(thinkingToggle?.getAttribute("aria-expanded")).toBe("false");
     expect(container.textContent).toContain("Thinking");
+    expect(container.textContent).not.toContain(
+      "I should check the existing renderer first.",
+    );
     expect(container.textContent).toContain("Done.");
   });
 
@@ -1332,7 +1364,7 @@ describe("MessagesWithTurns live stream order", () => {
       />,
     );
 
-    expect(container.textContent).toContain("Thinking");
+    expect(container.textContent).not.toContain("Thinking");
     expect(container.textContent).toContain("Patched.");
   });
 

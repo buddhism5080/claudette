@@ -92,6 +92,7 @@ function App() {
   );
   const setEditorFontZoom = useAppStore((s) => s.setEditorFontZoom);
   const setDisable1mContext = useAppStore((s) => s.setDisable1mContext);
+  const setContextLimitTokens = useAppStore((s) => s.setContextLimitTokens);
   const setAlternativeBackendsAvailable = useAppStore((s) => s.setAlternativeBackendsAvailable);
   const setAlternativeBackendsEnabled = useAppStore((s) => s.setAlternativeBackendsEnabled);
   const setCodexEnabled = useAppStore((s) => s.setCodexEnabled);
@@ -411,12 +412,18 @@ function App() {
         const flags =
           flagsResult.status === "fulfilled"
             ? flagsResult.value
-            : { alternative_backends_compiled: false, disable_1m_context: false };
+            : { alternative_backends_compiled: false, disable_1m_context: false, context_limit_tokens: null };
         if (flagsResult.status === "rejected") {
           console.error("Failed to load host environment flags:", flagsResult.reason);
         }
         setAlternativeBackendsAvailable(flags.alternative_backends_compiled);
         if (flags.disable_1m_context) setDisable1mContext(true);
+        if (
+          typeof flags.context_limit_tokens === "number" &&
+          flags.context_limit_tokens > 0
+        ) {
+          setContextLimitTokens(flags.context_limit_tokens);
+        }
         if (settingResult.status === "rejected") {
           console.error("Failed to load alternative backend setting:", settingResult.reason);
         }
@@ -953,7 +960,7 @@ function App() {
       unlistenMissingCli.then((fn) => fn());
       unlistenMissingWorktree.then((fn) => fn());
     };
-  }, [setRepositories, setWorkspaces, setWorktreeBaseDir, setDefaultTerminalAppId, setWorkspaceAppsMenuShown, setDefaultBranches, setTerminalFontSize, setLastMessages, setRemoteConnections, setDiscoveredServers, setLocalServerRunning, setLocalServerConnectionString, setCurrentThemeId, setThemeMode, setThemeDark, setThemeLight, setUiFontSize, setFontFamilySans, setFontFamilyMono, setSystemFonts, setDetectedApps, setUsageInsightsEnabled, setClaudetteMcpEnabled, setProjectViewIssuesPrsEnabled, setClaudetteTerminalEnabled, setShowSidebarRunningCommands, setToolDisplayMode, setExtendedToolCallOutput, setAlternativeBackendsAvailable, setAlternativeBackendsEnabled, setCodexEnabled, setAgentBackends, setDefaultAgentBackendId, setClaudeAuthMethod, setEditorGitGutterBase, setEditorMinimapEnabled, setRevealActiveFileInTree, setEditorWordWrap, setEditorLineNumbersEnabled, setEditorFontZoom, setDisable1mContext, setAppVersion, setVoiceToggleHotkey, setVoiceHoldHotkey, setKeybindings, setManualWorkspaceOrderByRepo, hydrateWorkspaceScmLinks]);
+  }, [setRepositories, setWorkspaces, setWorktreeBaseDir, setDefaultTerminalAppId, setWorkspaceAppsMenuShown, setDefaultBranches, setTerminalFontSize, setLastMessages, setRemoteConnections, setDiscoveredServers, setLocalServerRunning, setLocalServerConnectionString, setCurrentThemeId, setThemeMode, setThemeDark, setThemeLight, setUiFontSize, setFontFamilySans, setFontFamilyMono, setSystemFonts, setDetectedApps, setUsageInsightsEnabled, setClaudetteMcpEnabled, setProjectViewIssuesPrsEnabled, setClaudetteTerminalEnabled, setShowSidebarRunningCommands, setToolDisplayMode, setExtendedToolCallOutput, setAlternativeBackendsAvailable, setAlternativeBackendsEnabled, setCodexEnabled, setAgentBackends, setDefaultAgentBackendId, setClaudeAuthMethod, setEditorGitGutterBase, setEditorMinimapEnabled, setRevealActiveFileInTree, setEditorWordWrap, setEditorLineNumbersEnabled, setEditorFontZoom, setDisable1mContext, setContextLimitTokens, setAppVersion, setVoiceToggleHotkey, setVoiceHoldHotkey, setKeybindings, setManualWorkspaceOrderByRepo, hydrateWorkspaceScmLinks]);
 
   // Listen for OS light/dark changes and switch theme when mode is "system".
   useEffect(() => {
