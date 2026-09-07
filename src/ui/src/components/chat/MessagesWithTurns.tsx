@@ -27,6 +27,7 @@ import {
   assistantTextForTurn,
   buildPlainTurnFooters,
   findTriggeringUserIndex,
+  lastTurnStartUserIndex,
 } from "../../utils/chatTurnFooter";
 import {
   parseCompactionSentinel,
@@ -180,12 +181,10 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
   const liveAssistantMessageId = useAppStore(
     (s) => s.liveAssistantMessageId[sessionId] ?? null,
   );
-  const lastUserIndex = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.role === "User") return i;
-    }
-    return -1;
-  }, [messages]);
+  const lastUserIndex = useMemo(
+    () => lastTurnStartUserIndex(messages),
+    [messages],
+  );
   const resolvedClaudeAuthFailureMessageId = useAppStore(
     (s) => s.resolvedClaudeAuthFailureMessageId,
   );
@@ -346,13 +345,7 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
     > = {};
     const positions = new Set<number>();
 
-    let lastUserLocal = -1;
-    for (let idx = messages.length - 1; idx >= 0; idx--) {
-      if (messages[idx]?.role === "User") {
-        lastUserLocal = idx;
-        break;
-      }
-    }
+    const lastUserLocal = lastTurnStartUserIndex(messages);
     const lastUserGlobal = lastUserLocal >= 0 ? globalOffset + lastUserLocal : -1;
 
     const chromeTurnIdx = new Set<number>();
@@ -465,13 +458,7 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
     const activitiesByPosition = new Map<number, ToolActivity[]>();
     if (liveToolActivities.length === 0) return activitiesByPosition;
 
-    let userIdx = -1;
-    for (let idx = messages.length - 1; idx >= 0; idx--) {
-      if (messages[idx]?.role === "User") {
-        userIdx = idx;
-        break;
-      }
-    }
+    const userIdx = lastTurnStartUserIndex(messages);
 
     const assistantPositions: number[] = [];
     if (userIdx !== -1) {

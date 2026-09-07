@@ -12,6 +12,21 @@ export type PlainTurnFooterData = {
   outputTokens?: number;
 };
 
+export function isTurnStartUser(
+  msg: { role: string; parent_message_id?: string | null } | undefined,
+): boolean {
+  return msg?.role === "User" && !msg.parent_message_id;
+}
+
+export function lastTurnStartUserIndex<
+  T extends { role: string; parent_message_id?: string | null },
+>(messages: readonly T[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (isTurnStartUser(messages[i])) return i;
+  }
+  return -1;
+}
+
 export function findTriggeringUserIndex(
   messages: ChatMessage[],
   afterMessageIndex: number,
@@ -21,7 +36,7 @@ export function findTriggeringUserIndex(
     i >= 0;
     i--
   ) {
-    if (messages[i].role === "User") return i;
+    if (isTurnStartUser(messages[i])) return i;
   }
   return -1;
 }
@@ -52,11 +67,11 @@ export function buildPlainTurnFooters(
   );
 
   for (let userIdx = 0; userIdx < messages.length; userIdx++) {
-    if (messages[userIdx].role !== "User") continue;
+    if (!isTurnStartUser(messages[userIdx])) continue;
 
     let endExclusive = messages.length;
     for (let i = userIdx + 1; i < messages.length; i++) {
-      if (messages[i].role === "User") {
+      if (isTurnStartUser(messages[i])) {
         endExclusive = i;
         break;
       }

@@ -47,6 +47,7 @@ import {
   firstApprovalDetailString,
   initialToolInputJson,
   livePartFromContentBlockDelta,
+  lastUserIndex,
 } from "./useAgentStreamLogic";
 import {
   clearPromptStartTimeIfWorkspaceIdle,
@@ -824,13 +825,7 @@ export function useAgentStream() {
                     sealLiveAssistantMessage(sessionId);
                     const liveMsgs =
                       useAppStore.getState().chatMessages[sessionId] || [];
-                    let lastUser = -1;
-                    for (let i = liveMsgs.length - 1; i >= 0; i--) {
-                      if (liveMsgs[i]?.role === "User") {
-                        lastUser = i;
-                        break;
-                      }
-                    }
+                    const lastUser = lastUserIndex(liveMsgs);
                     const assistantCount = liveMsgs
                       .slice(lastUser + 1)
                       .filter((m) => m.role === "Assistant").length;

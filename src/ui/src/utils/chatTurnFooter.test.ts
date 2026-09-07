@@ -11,6 +11,7 @@ function msg(
   id: string,
   role: "User" | "Assistant" | "System",
   content = "",
+  parent?: string | null,
 ): ChatMessage {
   return {
     id,
@@ -26,6 +27,7 @@ function msg(
     output_tokens: null,
     cache_read_tokens: null,
     cache_creation_tokens: null,
+    parent_message_id: parent ?? null,
   };
 }
 
@@ -142,5 +144,33 @@ describe("chat turn footer derivation", () => {
 
     expect(result.get(4)?.rollbackCheckpointId).toBe("cp1");
     expect(result.get(4)?.forkCheckpointId).toBe("cp2");
+  });
+
+  it("skips a steered user when finding the turn-start prompt", () => {
+    const messages = [
+      msg("prompt", "User", "look this up"),
+      msg("a1", "Assistant", "searching"),
+      msg("steer", "User", "don't edit yet", "prompt"),
+      msg("a2", "Assistant", "ok"),
+    ];
+    expect(findTriggeringUserIndex(messages, 4)).toBe(0);
+    expect(assistantTextForTurn(messages, 0, 4)).toBe("searching\n\nok");
+  });
+
+  it("does not start a new plain-turn footer at a steer bubble", () => {
+    const messages = [
+      msg("prompt", "User", "look this up"),
+      msg("a1", "Assistant", "searching"),
+      msg("steer", "User", "don't edit yet", "prompt"),
+      msg("a2", "Assistant", "ok"),
+    ];
+    const result = buildPlainTurnFooters(
+      messages,
+      new Map([[0, null]]),
+      new Set(),
+    );
+    expect([...result.keys()]).toEqual([4]);
+    expect(result.get(4)?.userIdx).toBe(0);
+    expect(result.get(4)?.assistantText).toBe("searching\n\nok");
   });
 });

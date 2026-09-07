@@ -182,10 +182,13 @@ export function reconcileReloadedTranscript<
   return merged;
 }
 
-/** Last User index, or -1. A turn's assistant blocks sit after this. */
-export function lastUserIndex<T extends { role: string }>(messages: readonly T[]): number {
+/** Last turn-start User index, or -1. Steer bubbles (`parent_message_id`)
+ *  stay inside the open turn and must not become a new boundary. */
+export function lastUserIndex<T extends { role: string; parent_message_id?: string | null }>(
+  messages: readonly T[],
+): number {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === "User") return i;
+    if (messages[i]?.role === "User" && !messages[i]?.parent_message_id) return i;
   }
   return -1;
 }

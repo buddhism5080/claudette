@@ -1623,5 +1623,43 @@ describe("MessagesWithTurns live stream order", () => {
     expect(text).not.toContain("373.3k");
     expect(container.querySelector('button[aria-label="Fork workspace"]')).toBeNull();
   });
+
+  it("does not push in-turn tools below a steered user message", async () => {
+    const prompt = message("user-1", "User", "look this up");
+    const first = message("assistant-1", "Assistant", "I will search first.");
+    const steer = message("steer-1", "User", "don't edit yet");
+    steer.parent_message_id = "user-1";
+    const after = message("assistant-2", "Assistant", "Okay, no edits.");
+    useAppStore.setState({
+      toolActivities: {
+        [SESSION_ID]: [
+          {
+            toolUseId: "search-1",
+            toolName: "mcp__grok-search-rs__web_search",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "query",
+            assistantMessageOrdinal: 0,
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[prompt, first, steer, after]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("grok-search-rs");
+    expect(text.indexOf("grok-search-rs")).toBeLessThan(text.indexOf("don't edit yet"));
+  });
 });
 

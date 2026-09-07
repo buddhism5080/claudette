@@ -10,6 +10,7 @@ import {
   upsertPersistedMessageById,
   applyCompleteAssistantThinking,
   activitiesForCheckpointSave,
+  lastUserIndex,
   type CommandLineApplyDeps,
 } from "./useAgentStreamLogic";
 
@@ -327,5 +328,17 @@ describe("activitiesForCheckpointSave", () => {
         ],
       ),
     ).toEqual([{ toolUseId: "fastctx-1" }, { toolUseId: "fastctx-2" }]);
+  });
+});
+
+describe("lastUserIndex", () => {
+  it("skips steered user bubbles so the turn still starts at the prompt", () => {
+    const messages = [
+      { role: "User", parent_message_id: null },
+      { role: "Assistant" },
+      { role: "User", parent_message_id: "prompt" },
+      { role: "Assistant" },
+    ];
+    expect(lastUserIndex(messages)).toBe(0);
   });
 });
