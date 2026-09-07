@@ -1336,11 +1336,12 @@ describe("MessagesWithTurns live stream order", () => {
     expect(container.textContent).toContain("Patched.");
   });
 
-  it("expands thinking during a running turn even if the Eye chip is off", async () => {
-    const assistant = message("assistant-1", "Assistant", "Patched.");
+  it("expands only the in-flight thinking when the Eye chip is off", async () => {
+    const assistant = message("assistant-1", "Assistant", "");
     assistant.thinking = "I will edit the helper next.";
     useAppStore.setState({
       showThinkingBlocks: { [SESSION_ID]: false },
+      liveAssistantMessageId: { [SESSION_ID]: "assistant-1" },
     });
 
     const container = await render(
@@ -1355,14 +1356,104 @@ describe("MessagesWithTurns live stream order", () => {
     );
 
     expect(container.textContent).toContain("I will edit the helper next.");
+    expect(container.querySelector('[aria-expanded="true"]')).toBeTruthy();
   });
 
-  it("keeps the Thinking… header after the live id is sealed while the turn is still running", async () => {
-    const assistant = message("assistant-1", "Assistant", "I inspected the schema.");
-    assistant.thinking = "";
+  it("collapses earlier thinking once the next live block is streaming", async () => {
+    const first = message("asst-1", "Assistant", "");
+    first.thinking = "I will read the file first.";
+    const second = message("asst-2", "Assistant", "");
+    second.thinking = "Now I can patch it.";
+    useAppStore.setState({
+      showThinkingBlocks: { [SESSION_ID]: false },
+      liveAssistantMessageId: { [SESSION_ID]: "asst-2" },
+      toolActivities: {
+        [SESSION_ID]: [
+          {
+            toolUseId: "read-1",
+            toolName: "Read",
+            inputJson: JSON.stringify({ path: "src/app.ts" }),
+            resultText: "",
+            collapsed: true,
+            summary: "src/app.ts",
+            assistantMessageOrdinal: 0,
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[message("user-1", "User", "Fix the bug"), first, second]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    const toggles = [
+      ...container.querySelectorAll("button[aria-expanded]"),
+    ] as HTMLButtonElement[];
+    expect(toggles).toHaveLength(2);
+    expect(toggles[0]?.getAttribute("aria-expanded")).toBe("false");
+    expect(toggles[1]?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).not.toContain("I will read the file first.");
+    expect(container.textContent).toContain("Now I can patch it.");
+  });
+
+  it("does not keep historical thinking expanded just because a later turn is running", async () => {
+    const prior = message("assistant-1", "Assistant", "Done.");
+    prior.thinking = "Old reasoning from the previous turn.";
+    useAppStore.setState({
+      showThinkingBlocks: { [SESSION_ID]: false },
+      liveAssistantMessageId: { [SESSION_ID]: "assistant-2" },
+    });
+    const live = message("assistant-2", "Assistant", "");
+    live.thinking = "Working on the new request.";
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[
+          message("user-1", "User", "first"),
+          prior,
+          message("user-2", "User", "second"),
+          live,
+        ]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    expect(container.textContent).not.toContain(
+      "Old reasoning from the previous turn.",
+    );
+    expect(container.textContent).toContain("Working on the new request.");
+  });
+
+  it("collapses thinking after the live id is sealed so a tool can follow", async () => {
+    const assistant = message("assistant-1", "Assistant", "");
+    assistant.thinking = "I inspected the schema.";
     useAppStore.setState({
       showThinkingBlocks: { [SESSION_ID]: false },
       liveAssistantMessageId: { [SESSION_ID]: null },
+      toolActivities: {
+        [SESSION_ID]: [
+          {
+            toolUseId: "read-1",
+            toolName: "Read",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "schema.sql",
+            assistantMessageOrdinal: 0,
+          },
+        ],
+      },
     });
 
     const container = await render(
@@ -1377,6 +1468,9 @@ describe("MessagesWithTurns live stream order", () => {
     );
 
     expect(container.textContent).toContain("Thinking");
+    expect(container.querySelector('[aria-expanded="false"]')).toBeTruthy();
+    expect(container.textContent).not.toContain("I inspected the schema.");
+    expect(container.textContent).toContain("1 tool call");
   });
 
   it("shows a live Thinking… header with the Eye off and empty thinking so far", async () => {

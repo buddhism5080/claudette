@@ -180,12 +180,6 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
   const liveAssistantMessageId = useAppStore(
     (s) => s.liveAssistantMessageId[sessionId] ?? null,
   );
-  const lastAssistantId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.role === "Assistant") return messages[i]!.id;
-    }
-    return null;
-  }, [messages]);
   const resolvedClaudeAuthFailureMessageId = useAppStore(
     (s) => s.resolvedClaudeAuthFailureMessageId,
   );
@@ -992,18 +986,20 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
         // order is preserved. Always mount when the message carries thinking —
         // the Eye chip only controls default-expanded vs collapsed.
         const liveId = liveAssistantMessageId;
+        // Only the live thinking row auto-expands. A later tool/text/thinking
+        // block seals liveId, so the previous thinking collapses instead of
+        // leaving every block open for the whole running turn.
         const thinkingStreaming =
           isRunning &&
-          (liveId === msg.id ||
-            (!msg.thinking &&
-              liveId == null &&
-              msg.id === lastAssistantId));
+          liveId === msg.id &&
+          msg.thinking != null &&
+          !msg.content;
         const assistantThinking =
           msg.role === "Assistant" && msg.thinking != null ? (
             <ThinkingBlock
               content={msg.thinking}
               isStreaming={thinkingStreaming}
-              defaultExpanded={showThinkingBlocks || isRunning}
+              defaultExpanded={showThinkingBlocks}
               inline={toolDisplayMode === "inline"}
               searchQuery={searchQuery}
             />

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Brain } from "lucide-react";
 import { useTypewriter } from "../../hooks/useTypewriter";
 import { HighlightedPlainText } from "./HighlightedPlainText";
@@ -10,8 +10,8 @@ interface ThinkingBlockProps {
   isStreaming: boolean;
   enableTypewriter?: boolean;
   inline?: boolean;
-  /** When true, the block starts expanded (persisted thinking with the
-   *  toolbar Eye on). Live streaming always expands regardless. */
+  /** When true, the block stays expanded after streaming (persisted thinking
+   *  with the toolbar Eye on). Live streaming always expands regardless. */
   defaultExpanded?: boolean;
   searchQuery?: string;
 }
@@ -25,6 +25,11 @@ export function ThinkingBlock({
   searchQuery,
 }: ThinkingBlockProps) {
   const [expanded, setExpanded] = useState(isStreaming || defaultExpanded);
+  useEffect(() => {
+    // In-flight thinking stays open; once the next block arrives (or the
+    // turn ends) collapse unless the Eye chip asked to keep it expanded.
+    setExpanded(isStreaming || defaultExpanded);
+  }, [isStreaming, defaultExpanded]);
   const label = isStreaming ? "Thinking…" : "Thinking";
   const queryMatches =
     !!searchQuery && content.toLowerCase().includes(searchQuery.toLowerCase());

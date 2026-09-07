@@ -61,9 +61,67 @@ describe("ThinkingBlock", () => {
     const requestAnimationFrame = vi.spyOn(window, "requestAnimationFrame");
 
     await render(
-      <ThinkingBlock content="private reasoning" isStreaming={false} inline />,
+      <ThinkingBlock content="private reasoning" isStreaming={false} inline />
     );
 
     expect(requestAnimationFrame).not.toHaveBeenCalled();
+  });
+
+  it("expands while streaming even when defaultExpanded is off", async () => {
+    const container = await render(
+      <ThinkingBlock content="working it out" isStreaming />,
+    );
+
+    expect(container.querySelector('[aria-expanded="true"]')).toBeTruthy();
+    expect(container.textContent).toContain("working it out");
+    expect(container.textContent).toContain("Thinking…");
+  });
+
+  it("auto-collapses when streaming ends unless defaultExpanded", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mountedRoots.push(root);
+    mountedContainers.push(container);
+
+    await act(async () => {
+      root.render(<ThinkingBlock content="step one" isStreaming />);
+    });
+    expect(container.querySelector('[aria-expanded="true"]')).toBeTruthy();
+    expect(container.textContent).toContain("step one");
+
+    await act(async () => {
+      root.render(<ThinkingBlock content="step one" isStreaming={false} />);
+    });
+
+    expect(container.querySelector('[aria-expanded="false"]')).toBeTruthy();
+    expect(container.textContent).not.toContain("step one");
+    expect(container.textContent).toContain("Thinking");
+  });
+
+  it("stays expanded after streaming when defaultExpanded is on", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mountedRoots.push(root);
+    mountedContainers.push(container);
+
+    await act(async () => {
+      root.render(
+        <ThinkingBlock content="keep me" isStreaming defaultExpanded />,
+      );
+    });
+    await act(async () => {
+      root.render(
+        <ThinkingBlock
+          content="keep me"
+          isStreaming={false}
+          defaultExpanded
+        />,
+      );
+    });
+
+    expect(container.querySelector('[aria-expanded="true"]')).toBeTruthy();
+    expect(container.textContent).toContain("keep me");
   });
 });
