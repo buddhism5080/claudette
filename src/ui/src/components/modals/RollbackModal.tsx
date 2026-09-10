@@ -46,7 +46,12 @@ export function RollbackModal() {
 
       const messages = isClearAll
         ? await clearConversation(sessionId, restoreFiles)
-        : await rollbackToCheckpoint(sessionId, checkpointId, restoreFiles);
+        : await rollbackToCheckpoint(
+            sessionId,
+            checkpointId,
+            restoreFiles,
+            messageId,
+          );
       rollbackConversation(
         sessionId,
         workspaceId,

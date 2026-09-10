@@ -3,7 +3,9 @@ use tauri::State;
 use claudette::agent::claude_transcript_path;
 use claudette::agent::jsonl_clone::write_rebound_prefix;
 use claudette::db::Database;
-use claudette::model::{ChatMessage, CompletedTurnData, ConversationCheckpoint, TurnToolActivity};
+use claudette::model::{
+    ChatMessage, ChatRole, CompletedTurnData, ConversationCheckpoint, TurnToolActivity,
+};
 use claudette::{agent, git, snapshot};
 
 use crate::state::{AgentSessionState, AppState};
@@ -21,11 +23,18 @@ pub async fn list_checkpoints(
         .map_err(|e| e.to_string())
 }
 
+/// Roll the chat back to a restore snapshot.
+///
+/// `from_message_id` is the user bubble being undone. Chat is cut from
+/// that row inclusive so an early checkpoint anchor (thinking row /
+/// walked-back prior turn) cannot delete previous-turn content. Files
+/// and jsonl still follow the checkpoint.
 #[tauri::command]
 pub async fn rollback_to_checkpoint(
     session_id: String,
     checkpoint_id: String,
     restore_files: bool,
+    from_message_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<ChatMessage>, String> {
     let db = Database::open(&state.db_path).map_err(|e| e.to_string())?;
@@ -120,10 +129,49 @@ pub async fn rollback_to_checkpoint(
         }
     }
 
-    db.delete_session_messages_after(&chat_session_id, &checkpoint.message_id)
-        .map_err(|e| e.to_string())?;
+    let mut truncated_from_user = false;
+    if let Some(from_id) = from_message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        let deleted = db
+            .delete_session_messages_from(&chat_session_id, from_id)
+            .map_err(|e| e.to_string())?;
+        truncated_from_user = deleted > 0;
+    }
+    if !truncated_from_user {
+        // Old clients that don't pass the user bubble: cut after the
+        // checkpoint anchor (previous-turn last message when the snapshot
+        // was taken at prompt time).
+        db.delete_session_messages_after(&chat_session_id, &checkpoint.message_id)
+            .map_err(|e| e.to_string())?;
+    }
     db.delete_session_checkpoints_after(&chat_session_id, checkpoint.turn_index)
         .map_err(|e| e.to_string())?;
+
+    let remaining = db
+        .list_chat_messages_for_session(&chat_session_id)
+        .map_err(|e| e.to_string())?;
+    // Resume the cloned JSONL only when it describes the same last row the
+    // UI now holds. An early thinking-row checkpoint's prefix is shorter
+    // than the previous turn we just kept; --resume would hide that text
+    // from the model. Seed a prelude instead so the next send sees the
+    // remaining chat.
+    let jsonl_matches_ui = remaining
+        .last()
+        .is_some_and(|m| m.id == checkpoint.message_id);
+    let use_cloned_jsonl = cloned_jsonl && jsonl_matches_ui;
+    let prelude = if use_cloned_jsonl {
+        None
+    } else {
+        let seed: Vec<ChatMessage> = remaining
+            .iter()
+            .filter(|m| !matches!(m.role, ChatRole::System))
+            .cloned()
+            .collect();
+        agent::history_seeder::build_migration_prelude(&seed)
+    };
 
     let snapshot = {
         let mut agents = state.agents.write().await;
@@ -160,8 +208,11 @@ pub async fn rollback_to_checkpoint(
                 posted_env_trust_warning: false,
                 pending_history_prelude: None,
             });
-        let snap = apply_migration_to_session(session, None);
-        if cloned_jsonl {
+        let snap = apply_migration_to_session(
+            session,
+            if use_cloned_jsonl { None } else { prelude },
+        );
+        if use_cloned_jsonl {
             session.session_id = new_claude_sid.clone();
             session.pending_history_prelude = None;
         }
@@ -183,7 +234,7 @@ pub async fn rollback_to_checkpoint(
     if !prior_sid_for_cleanup.is_empty() {
         let _ = db.end_agent_session(&prior_sid_for_cleanup, false);
     }
-    if cloned_jsonl {
+    if use_cloned_jsonl {
         db.save_chat_session_state(&chat_session_id, &new_claude_sid, 0)
             .map_err(|e| e.to_string())?;
         if !prior_sid_for_cleanup.is_empty() && prior_sid_for_cleanup != new_claude_sid {
@@ -197,8 +248,7 @@ pub async fn rollback_to_checkpoint(
             .map_err(|e| e.to_string())?;
     }
 
-    db.list_chat_messages_for_session(&chat_session_id)
-        .map_err(|e| e.to_string())
+    Ok(remaining)
 }
 
 /// Clear the entire conversation for a workspace, optionally restoring files

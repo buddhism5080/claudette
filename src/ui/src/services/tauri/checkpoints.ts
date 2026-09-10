@@ -16,11 +16,13 @@ export function rollbackToCheckpoint(
   sessionId: string,
   checkpointId: string,
   restoreFiles: boolean,
+  fromMessageId?: string | null,
 ): Promise<ChatMessage[]> {
   return invoke("rollback_to_checkpoint", {
     sessionId,
     checkpointId,
     restoreFiles,
+    fromMessageId: fromMessageId ?? null,
   });
 }
 

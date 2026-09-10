@@ -1570,6 +1570,32 @@ impl Database {
         Ok(deleted)
     }
 
+    /// Delete `from_message_id` and every later message in the session,
+    /// ordered the same way the UI lists them (`created_at`, `rowid`).
+    ///
+    /// Rollback buttons sit on a *user* bubble. The restore checkpoint may
+    /// be anchored earlier (previous-turn thinking row, or a walked-back
+    /// checkpoint from a prior turn). Cutting after that anchor would drop
+    /// previous-turn content the user did not ask to undo.
+    pub fn delete_session_messages_from(
+        &self,
+        chat_session_id: &str,
+        from_message_id: &str,
+    ) -> Result<usize, rusqlite::Error> {
+        let deleted = self.conn.execute(
+            "DELETE FROM chat_messages
+             WHERE chat_session_id = ?1
+               AND (created_at, rowid) >= (
+                 SELECT m.created_at, m.rowid
+                   FROM chat_messages m
+                  WHERE m.id = ?2 AND m.chat_session_id = ?1
+               )",
+            params![chat_session_id, from_message_id],
+        )?;
+        self.best_effort_incremental_vacuum_after_delete(deleted);
+        Ok(deleted)
+    }
+
     /// Session-scoped variant of [`Self::list_completed_turns`].
     pub fn list_completed_turns_for_session(
         &self,
@@ -2919,6 +2945,121 @@ mod tests {
         assert_eq!(
             remaining_ids,
             vec!["u1".to_string(), "th1".to_string(), "a1".to_string()]
+        );
+    }
+
+    /// Rolling back the next user prompt must keep the previous turn's later
+    /// assistant rows even when the restore checkpoint is anchored on an
+    /// earlier thinking block (old first-tool snapshots, or a walked-back
+    /// checkpoint from a prior turn). Cutting *after the checkpoint* drops
+    /// `a1`; cutting *from the undone user* keeps it.
+    #[test]
+    fn test_delete_session_messages_from_user_keeps_previous_turn_text() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "u1", "w1", ChatRole::User, "go"))
+            .unwrap();
+        let mut thinking_only = make_chat_msg(&db, "th1", "w1", ChatRole::Assistant, "");
+        thinking_only.thinking = Some("plan the read".into());
+        db.insert_chat_message(&thinking_only).unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "a1", "w1", ChatRole::Assistant, "done"))
+            .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "u2", "w1", ChatRole::User, "next"))
+            .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "a2", "w1", ChatRole::Assistant, "later"))
+            .unwrap();
+
+        let session = db
+            .default_session_id_for_workspace("w1")
+            .unwrap()
+            .expect("session");
+
+        // Contrast: cutting after the thinking-row checkpoint also drops a1.
+        assert_eq!(
+            db.delete_session_messages_after(&session, "th1").unwrap(),
+            3
+        );
+        db.insert_chat_message(&make_chat_msg(&db, "a1", "w1", ChatRole::Assistant, "done"))
+            .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "u2", "w1", ChatRole::User, "next"))
+            .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "a2", "w1", ChatRole::Assistant, "later"))
+            .unwrap();
+
+        let deleted = db.delete_session_messages_from(&session, "u2").unwrap();
+        assert_eq!(deleted, 2);
+        let remaining = db.list_chat_messages_for_session(&session).unwrap();
+        let remaining_ids: Vec<_> = remaining.iter().map(|m| m.id.clone()).collect();
+        assert_eq!(
+            remaining_ids,
+            vec!["u1".to_string(), "th1".to_string(), "a1".to_string()]
+        );
+        assert_eq!(remaining[1].thinking.as_deref(), Some("plan the read"));
+        assert_eq!(remaining[2].content, "done");
+    }
+
+    /// List order is `(created_at, rowid)`. A later-inserted row with an
+    /// earlier timestamp appears *before* the cut point in the UI and must
+    /// survive a from-user truncate (rowid-only delete would drop it).
+    #[test]
+    fn test_delete_session_messages_from_follows_created_at_not_rowid() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "u1", "w1", ChatRole::User, "first"))
+            .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "a1", "w1", ChatRole::Assistant, "ok"))
+            .unwrap();
+        db.insert_chat_message(&make_chat_msg(&db, "u2", "w1", ChatRole::User, "second"))
+            .unwrap();
+        db.insert_chat_message(&make_chat_msg(
+            &db,
+            "late-early",
+            "w1",
+            ChatRole::System,
+            "inserted late but stamped earlier",
+        ))
+        .unwrap();
+        db.execute_batch(
+            "UPDATE chat_messages SET created_at = '2000-01-01 00:00:00' WHERE id = 'late-early';
+             UPDATE chat_messages SET created_at = '2000-01-01 00:00:01' WHERE id = 'u1';
+             UPDATE chat_messages SET created_at = '2000-01-01 00:00:02' WHERE id = 'a1';
+             UPDATE chat_messages SET created_at = '2000-01-01 00:00:03' WHERE id = 'u2';",
+        )
+        .unwrap();
+
+        let session = db
+            .default_session_id_for_workspace("w1")
+            .unwrap()
+            .expect("session");
+        let listed: Vec<_> = db
+            .list_chat_messages_for_session(&session)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                "late-early".to_string(),
+                "u1".to_string(),
+                "a1".to_string(),
+                "u2".to_string()
+            ]
+        );
+
+        let deleted = db.delete_session_messages_from(&session, "u2").unwrap();
+        assert_eq!(deleted, 1);
+        let remaining: Vec<_> = db
+            .list_chat_messages_for_session(&session)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                "late-early".to_string(),
+                "u1".to_string(),
+                "a1".to_string()
+            ]
         );
     }
 
