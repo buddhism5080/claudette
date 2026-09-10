@@ -1350,15 +1350,10 @@ export function useAgentStream() {
     };
   }, [updateWorkspace]);
 
-  // Listen for session-renamed events. The backend emits this from
-  // `try_generate_session_name` after Haiku produces a short label
-  // for the first user prompt — the same flow that renames the
-  // workspace. Without this listener the chat tab kept its `New chat`
-  // placeholder until the user switched workspaces and came back, at
-  // which point `SessionTabs`' mount effect re-fetched the session
-  // list and the renamed value finally surfaced. Mirroring the
-  // workspace-renamed handler closes that gap so the tab updates
-  // live.
+  // Listen for session-renamed events (prompt fallback at persist, then
+  // Claude Code's own `custom-title` jsonl row when it lands). Without
+  // this listener the chat tab kept its `New chat` placeholder until
+  // the user switched workspaces and came back.
   useEffect(() => {
     let active = true;
     const unlisten = listen<{
@@ -1366,8 +1361,14 @@ export function useAgentStream() {
       name: string;
     }>("session-renamed", (event) => {
       if (!active) return;
-      const { session_id, name } = event.payload;
-      updateChatSession(session_id, { name });
+      const { session_id, sessionId, name } = event.payload as {
+        session_id?: string;
+        sessionId?: string;
+        name: string;
+      };
+      const id = session_id || sessionId;
+      if (!id || !name) return;
+      updateChatSession(id, { name });
     });
     return () => {
       active = false;

@@ -24,8 +24,8 @@ use claudette::db::Database;
 use claudette::env::WorkspaceEnv;
 use claudette::mcp_supervisor::McpSupervisor;
 use claudette::model::{
-    ChatMessage, ChatRole, TurnToolActivity, fallback_session_name, is_placeholder_session_name,
-    should_attempt_session_auto_name,
+    ChatMessage, ChatRole, TurnToolActivity, is_placeholder_session_name,
+    prompt_fallback_session_name, should_attempt_session_auto_name,
 };
 use claudette::permissions::tools_for_level;
 
@@ -35,7 +35,7 @@ use crate::state::{
 };
 
 use super::interaction::{deny_drained_permissions, drain_pending_permissions};
-use super::naming::{try_auto_rename, try_generate_session_name};
+use super::naming::{try_adopt_cli_session_title, try_auto_rename};
 use super::{
     ATTENTION_NOTIFY_DELAY_MS, AgentStreamPayload, AttachmentInput, AttachmentResponse,
     ChatHistoryPage, build_agent_hook_bridge, fire_completion_notification, now_iso,
@@ -1200,6 +1200,24 @@ pub async fn send_chat_message(
     persist_user_send(&db, &prepared_user_send)?;
     let user_msg = prepared_user_send.user_msg.clone();
     let image_attachments = prepared_user_send.cli_atts;
+
+    // Name the tab as soon as the prompt is in the DB — do not wait for
+    // Claude to spawn. Spawn can take tens of seconds or fail; either
+    // used to leave the tab stuck on "New chat". Haiku may still
+    // overwrite later because `name_edited` stays 0.
+    if let Some(fallback) = prompt_fallback_session_name(
+        session_name_already_edited,
+        &chat_session.name,
+        &content,
+    ) {
+        if let Ok(true) = db.set_session_name_from_haiku(&chat_session_id, &fallback) {
+            let payload = serde_json::json!({
+                "session_id": chat_session_id,
+                "name": fallback,
+            });
+            let _ = app.emit("session-renamed", &payload);
+        }
+    }
 
     // Resolve allowed tools from permission level.
     let level = permission_level.as_deref().unwrap_or("full");
@@ -2481,22 +2499,6 @@ pub async fn send_chat_message(
     let rename_prompt = first_user_message_text(&remote_control_title_messages)
         .unwrap_or_else(|| content.clone());
 
-    // Name the tab immediately from the first user prompt so a Haiku
-    // failure (or a first-turn abort that used to consume the one-shot)
-    // cannot leave the UI stuck on "New chat". Haiku may still overwrite
-    // this later because `name_edited` stays 0.
-    if should_attempt_session_auto_name(session_name_already_edited, &chat_session.name) {
-        let fallback = fallback_session_name(&rename_prompt);
-        if fallback != chat_session.name
-            && let Ok(true) = db.set_session_name_from_haiku(&chat_session_id, &fallback)
-        {
-            let payload = serde_json::json!({
-                "session_id": chat_session_id,
-                "name": fallback,
-            });
-            let _ = app.emit("session-renamed", &payload);
-        }
-    }
     let mut remote_control_reenable_after_result =
         if should_reenable_remote_control && let Some(ps) = ps_for_remote_control_reenable {
             Some((
@@ -2577,25 +2579,22 @@ pub async fn send_chat_message(
             });
         }
 
-        // Also spawn a background task to generate a human-readable session
-        // name for the tab. Retries while the tab is still the placeholder
-        // (a first-turn abort used to skip forever once turn_count > 1).
-        // Skipped if the user already renamed the session manually.
+        // Adopt Claude Code's own session title (`custom-title` in jsonl)
+        // instead of spawning a second Haiku. Prompt fallback already
+        // renamed the tab at persist time; this overwrites with the CLI
+        // title when it lands. Skipped if the user already renamed.
         if should_attempt_session_auto_name(session_name_already_edited, &chat_session.name)
             && should_run_auto_naming(remote_control_active_for_turn)
+            && let Some(cli_sid) = claude_sid_for_stream
+                .clone()
+                .filter(|s| !s.trim().is_empty())
         {
             let sid2 = chat_session_id_for_stream.clone();
             let wt_path2 = wt_path.clone();
-            let prompt2 = rename_prompt.clone();
             let db_path2 = db_path.clone();
             let app2 = app.clone();
-            let ws_env2 = rename_ws_env.clone();
-            let backend2 = rename_backend_runtime.clone();
             tokio::spawn(async move {
-                try_generate_session_name(
-                    &sid2, &wt_path2, &prompt2, &db_path2, &app2, &ws_env2, &backend2,
-                )
-                .await;
+                try_adopt_cli_session_title(&sid2, &wt_path2, &cli_sid, &db_path2, &app2).await;
             });
         }
 

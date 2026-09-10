@@ -98,6 +98,24 @@ pub fn fallback_session_name(prompt: &str) -> String {
     collapsed.chars().take(SESSION_NAME_MAX_CHARS).collect()
 }
 
+/// Name to write when a placeholder tab receives its first prompt.
+/// `None` means leave the current title alone (user already renamed, or
+/// the tab is not a placeholder).
+pub fn prompt_fallback_session_name(
+    name_edited: bool,
+    current_name: &str,
+    prompt: &str,
+) -> Option<String> {
+    if !should_attempt_session_auto_name(name_edited, current_name) {
+        return None;
+    }
+    let fallback = fallback_session_name(prompt);
+    if fallback == current_name {
+        return None;
+    }
+    Some(fallback)
+}
+
 /// Normalize a user-supplied session name. Trims surrounding whitespace,
 /// rejects the empty string, and caps at `SESSION_NAME_MAX_CHARS`
 /// characters (not bytes) so we can't split a multi-byte codepoint.
@@ -172,6 +190,26 @@ mod tests {
         assert_eq!(
             fallback_session_name(&long).chars().count(),
             SESSION_NAME_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn prompt_fallback_renames_new_chat_from_first_prompt() {
+        assert_eq!(
+            prompt_fallback_session_name(false, "New chat", "fix the login timeout"),
+            Some("fix the login timeout".into())
+        );
+    }
+
+    #[test]
+    fn prompt_fallback_skips_when_user_already_named_the_tab() {
+        assert_eq!(
+            prompt_fallback_session_name(true, "New chat", "fix the login timeout"),
+            None
+        );
+        assert_eq!(
+            prompt_fallback_session_name(false, "Auth flow", "fix the login timeout"),
+            None
         );
     }
 }

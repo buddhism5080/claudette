@@ -15,9 +15,7 @@ use super::args::{
     build_settings_json, build_stdin_message_with_uuid, build_steering_stdin_message,
 };
 use super::binary::resolve_claude_path;
-use super::environment::{
-    apply_teammate_command_override, build_agent_command, suppress_cli_session_title_generation,
-};
+use super::environment::{apply_teammate_command_override, build_agent_command};
 use super::process::{AgentEvent, TurnHandle};
 use super::types::{ControlResponsePayload, FileAttachment, StreamEvent, parse_stream_line};
 
@@ -130,10 +128,6 @@ impl PersistentSession {
         // after a Remote Control-origin turn leaves stdin idle. Claudette owns
         // process lifetime for PersistentSession, so keep the child alive.
         apply_persistent_session_idle_keepalive(&mut cmd);
-        // Claudette names sessions itself. The CLI's background Haiku title
-        // request is a second in-flight HTTP call that custom backends often
-        // abort within ~1–2s (upstream HTTP 499).
-        suppress_cli_session_title_generation(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
             crate::missing_cli::map_spawn_err(&e, "claude", || {

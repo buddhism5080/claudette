@@ -22,11 +22,12 @@ pub use cesp::{
 pub use chat_message::{ChatMessage, ChatRole};
 pub use chat_session::{
     AttentionKind, ChatSession, DEFAULT_SESSION_NAME, SessionStatus, fallback_session_name,
-    is_placeholder_session_name, should_attempt_session_auto_name, validate_session_name,
+    is_placeholder_session_name, prompt_fallback_session_name, should_attempt_session_auto_name,
+    validate_session_name,
 };
 pub use checkpoint::{
-    cap_tool_result_text, CheckpointFile, CompletedTurnData, ConversationCheckpoint,
-    TurnToolActivity, TOOL_RESULT_TEXT_MAX_CHARS,
+    CheckpointFile, CompletedTurnData, ConversationCheckpoint, TOOL_RESULT_TEXT_MAX_CHARS,
+    TurnToolActivity, cap_tool_result_text,
 };
 pub use metrics::{
     AgentCommit, AgentSession, AnalyticsMetrics, DashboardMetrics, DeletedWorkspaceSummary,

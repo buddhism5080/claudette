@@ -138,54 +138,41 @@ pub(crate) async fn try_auto_rename(
     );
 }
 
-/// Background task: ask Haiku for a short session name and persist it. All
-/// failures are non-fatal — if Haiku is unavailable or the user has already
-/// renamed the session, the `New chat` default stays in place.
-pub(crate) async fn try_generate_session_name(
-    session_id: &str,
+/// Watch the live Claude jsonl for the CLI's own `custom-title` row and
+/// adopt it. Claude Code writes auto-Haiku titles there; they are not
+/// streamed on stdout. Polls for a bounded window so a slow or 499'd
+/// title request does not hang the turn.
+pub(crate) async fn try_adopt_cli_session_title(
+    chat_session_id: &str,
     worktree_path: &str,
-    prompt: &str,
+    claude_sid: &str,
     db_path: &std::path::Path,
     app: &AppHandle,
-    ws_env: &WorkspaceEnv,
-    backend_runtime: &AgentBackendRuntime,
 ) {
-    let name = match agent::generate_session_name(
-        prompt,
-        worktree_path,
-        Some(ws_env),
-        Some(backend_runtime),
-    )
-    .await
-    {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::warn!(
-                target: "claudette::chat",
-                session_id = %session_id,
-                error = %e,
-                "session auto-name: generate_session_name failed",
-            );
-            let fallback = claudette::model::fallback_session_name(prompt);
-            if claudette::model::is_placeholder_session_name(&fallback) {
-                return;
+    let Ok(path) = agent::claude_transcript_path(worktree_path, claude_sid) else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(&path)
+            && let Some(title) = agent::latest_custom_title(&contents, claude_sid)
+        {
+            let db = match Database::open(db_path) {
+                Ok(db) => db,
+                Err(_) => return,
+            };
+            if let Ok(true) = db.set_session_name_from_haiku(chat_session_id, &title) {
+                let payload = serde_json::json!({
+                    "session_id": chat_session_id,
+                    "name": title,
+                });
+                let _ = app.emit("session-renamed", &payload);
             }
-            fallback
+            return;
         }
-    };
-
-    let db = match Database::open(db_path) {
-        Ok(db) => db,
-        Err(_) => return,
-    };
-
-    // The helper only writes when `name_edited == 0`, so a concurrent user
-    // rename between spawn and write is handled correctly — we become a no-op.
-    if let Ok(true) = db.set_session_name_from_haiku(session_id, &name) {
-        let payload = serde_json::json!({
-            "session_id": session_id,
-            "name": name,
-        });
-        let _ = app.emit("session-renamed", &payload);
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
 }

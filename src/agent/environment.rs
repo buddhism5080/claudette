@@ -8,9 +8,12 @@ use crate::env_provider::ResolvedEnv;
 const CLAUDE_CODE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
 const CLAUDE_CODE_DISABLE_TERMINAL_TITLE: &str = "CLAUDE_CODE_DISABLE_TERMINAL_TITLE";
 
-/// Claude Code otherwise fires a background Haiku request to title unnamed
-/// sessions. Headless/SDK hosts that already name sessions (and slow
-/// third-party backends) see that side request aborted in ~1–2s as HTTP 499.
+/// Claude Code fires a background Haiku request to title unnamed sessions
+/// and writes the result as a `custom-title` jsonl row. Live agent
+/// processes must leave that request enabled so Claudette can adopt the
+/// CLI's title instead of spawning a second Haiku. `--print` utilities
+/// still suppress it: they are not a session, and a title request there
+/// is wasted work (and a 499 on slow backends).
 pub(crate) fn suppress_cli_session_title_generation(cmd: &mut Command) {
     cmd.env(CLAUDE_CODE_DISABLE_TERMINAL_TITLE, "1");
 }

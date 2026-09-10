@@ -151,6 +151,37 @@ pub fn claude_session_transcript_exists(worktree_path: &str, session_id: &str) -
     claude_transcript_path(worktree_path, session_id).is_ok_and(|p| p.is_file())
 }
 
+/// Latest `custom-title` row Claude Code wrote for this session id.
+/// Auto-generated Haiku titles and `/rename` / `--name` all land as this
+/// jsonl type. Last matching row wins.
+pub fn latest_custom_title(source: &str, session_id: &str) -> Option<String> {
+    if session_id.trim().is_empty() {
+        return None;
+    }
+    let mut found = None;
+    for line in source.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("custom-title") {
+            continue;
+        }
+        if value.get("sessionId").and_then(|v| v.as_str()) != Some(session_id) {
+            continue;
+        }
+        let Some(title) = value
+            .get("customTitle")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        else {
+            continue;
+        };
+        found = Some(title.chars().take(60).collect());
+    }
+    found
+}
+
 /// Persist a Claude Code custom title for a session transcript.
 ///
 /// Claude Code's Remote Control bridge treats custom titles as explicit and
@@ -565,5 +596,31 @@ mod tests {
                 None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
             }
         }
+    }
+
+    #[test]
+    fn latest_custom_title_reads_the_last_matching_row() {
+        let src = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"s1\"}\n",
+            "{\"type\":\"custom-title\",\"customTitle\":\"First\",\"sessionId\":\"s1\"}\n",
+            "{\"type\":\"custom-title\",\"customTitle\":\"Later\",\"sessionId\":\"s1\"}\n",
+            "{\"type\":\"custom-title\",\"customTitle\":\"Other session\",\"sessionId\":\"s2\"}\n",
+        );
+        assert_eq!(latest_custom_title(src, "s1").as_deref(), Some("Later"));
+        assert_eq!(
+            latest_custom_title(src, "s2").as_deref(),
+            Some("Other session")
+        );
+        assert_eq!(latest_custom_title(src, "missing"), None);
+    }
+
+    #[test]
+    fn latest_custom_title_skips_blank_and_malformed_rows() {
+        let src = concat!(
+            "not json\n",
+            "{\"type\":\"custom-title\",\"customTitle\":\"  \",\"sessionId\":\"s1\"}\n",
+            "{\"type\":\"custom-title\",\"customTitle\":\"Real\",\"sessionId\":\"s1\"}\n",
+        );
+        assert_eq!(latest_custom_title(src, "s1").as_deref(), Some("Real"));
     }
 }
