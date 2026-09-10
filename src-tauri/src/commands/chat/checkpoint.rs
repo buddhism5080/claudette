@@ -1,7 +1,7 @@
 use tauri::State;
 
 use claudette::agent::claude_transcript_path;
-use claudette::agent::jsonl_clone::write_rebound_prefix;
+use claudette::agent::jsonl_clone::{prefix_len_before_user_prompt, write_rebound_prefix};
 use claudette::db::Database;
 use claudette::model::{
     ChatMessage, ChatRole, CompletedTurnData, ConversationCheckpoint, TurnToolActivity,
@@ -23,12 +23,13 @@ pub async fn list_checkpoints(
         .map_err(|e| e.to_string())
 }
 
-/// Roll the chat back to a restore snapshot.
+/// Roll the chat back to before `from_message_id` (the undone user bubble).
 ///
-/// `from_message_id` is the user bubble being undone. Chat is cut from
-/// that row inclusive so an early checkpoint anchor (thinking row /
-/// walked-back prior turn) cannot delete previous-turn content. Files
-/// and jsonl still follow the checkpoint.
+/// Chat is cut from that row inclusive. Files restore from the snapshot
+/// taken when that prompt was sent (latest checkpoint on a row before it),
+/// falling back to the mapped checkpoint. CLI jsonl is cloned up to that
+/// same user prompt so `--resume` matches the remaining chat — not a
+/// stuffed history prelude.
 #[tauri::command]
 pub async fn rollback_to_checkpoint(
     session_id: String,
@@ -89,13 +90,25 @@ pub async fn rollback_to_checkpoint(
         .ok_or("Workspace not found")?;
     let wt = ws.worktree_path.as_deref();
 
+    let messages_now = db
+        .list_chat_messages_for_session(&chat_session_id)
+        .map_err(|e| e.to_string())?;
+    let from_id = from_message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
     if restore_files {
         let wt = wt.ok_or("Workspace has no worktree")?;
-        if checkpoint.has_file_state {
-            snapshot::restore_snapshot(&state.db_path, &checkpoint_id, wt)
+        let all_cps = db
+            .list_checkpoints_for_session(&chat_session_id)
+            .map_err(|e| e.to_string())?;
+        let file_cp = file_restore_checkpoint(&checkpoint, &all_cps, &messages_now, from_id);
+        if file_cp.has_file_state {
+            snapshot::restore_snapshot(&state.db_path, &file_cp.id, wt)
                 .await
                 .map_err(|e| e.to_string())?;
-        } else if let Some(ref commit_hash) = checkpoint.commit_hash {
+        } else if let Some(ref commit_hash) = file_cp.commit_hash {
             git::restore_to_commit(wt, commit_hash)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -111,30 +124,36 @@ pub async fn rollback_to_checkpoint(
             (!s.trim().is_empty()).then_some(s)
         });
     let new_claude_sid = uuid::Uuid::new_v4().to_string();
+    let mut prefix_len = checkpoint.jsonl_byte_len.filter(|n| *n > 0);
+    let mut used_user_prompt_cut = false;
+    if let (Some(from_id), Some(src_sid), Some(wt_path)) = (from_id, src_jsonl_sid.as_deref(), wt) {
+        if let Some(nth) = user_prompt_ordinal(&messages_now, from_id)
+            && let Ok(src_path) = claude_transcript_path(wt_path, src_sid)
+            && src_path.is_file()
+            && let Ok(bytes) = std::fs::read(&src_path)
+            && let Some(cut) = prefix_len_before_user_prompt(&bytes, nth)
+            && cut > 0
+        {
+            prefix_len = Some(cut as i64);
+            used_user_prompt_cut = true;
+        }
+    }
     let mut cloned_jsonl = false;
-    if let (Some(len), Some(src_sid), Some(wt)) =
-        (checkpoint.jsonl_byte_len, src_jsonl_sid.as_deref(), wt)
-    {
-        if len > 0 {
-            if let (Ok(src_path), Ok(dest_path)) = (
-                claude_transcript_path(wt, src_sid),
-                claude_transcript_path(wt, &new_claude_sid),
-            ) {
-                if src_path.is_file() {
-                    write_rebound_prefix(&src_path, &dest_path, len as u64, &new_claude_sid)
-                        .map_err(|e| format!("Failed to clone Claude transcript: {e}"))?;
-                    cloned_jsonl = true;
-                }
+    if let (Some(len), Some(src_sid), Some(wt)) = (prefix_len, src_jsonl_sid.as_deref(), wt) {
+        if let (Ok(src_path), Ok(dest_path)) = (
+            claude_transcript_path(wt, src_sid),
+            claude_transcript_path(wt, &new_claude_sid),
+        ) {
+            if src_path.is_file() {
+                write_rebound_prefix(&src_path, &dest_path, len as u64, &new_claude_sid)
+                    .map_err(|e| format!("Failed to clone Claude transcript: {e}"))?;
+                cloned_jsonl = true;
             }
         }
     }
 
     let mut truncated_from_user = false;
-    if let Some(from_id) = from_message_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
+    if let Some(from_id) = from_id {
         let deleted = db
             .delete_session_messages_from(&chat_session_id, from_id)
             .map_err(|e| e.to_string())?;
@@ -147,31 +166,29 @@ pub async fn rollback_to_checkpoint(
         db.delete_session_messages_after(&chat_session_id, &checkpoint.message_id)
             .map_err(|e| e.to_string())?;
     }
-    db.delete_session_checkpoints_after(&chat_session_id, checkpoint.turn_index)
-        .map_err(|e| e.to_string())?;
 
     let remaining = db
         .list_chat_messages_for_session(&chat_session_id)
         .map_err(|e| e.to_string())?;
-    // Resume the cloned JSONL only when it describes the same last row the
-    // UI now holds. An early thinking-row checkpoint's prefix is shorter
-    // than the previous turn we just kept; --resume would hide that text
-    // from the model. Seed a prelude instead so the next send sees the
-    // remaining chat.
+    let remaining_ids: std::collections::HashSet<String> =
+        remaining.iter().map(|m| m.id.clone()).collect();
+    let keep_turn = db
+        .list_checkpoints_for_session(&chat_session_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|cp| remaining_ids.contains(&cp.message_id))
+        .map(|cp| cp.turn_index)
+        .max()
+        .unwrap_or(-1);
+    db.delete_session_checkpoints_after(&chat_session_id, keep_turn)
+        .map_err(|e| e.to_string())?;
     let jsonl_matches_ui = remaining
         .last()
         .is_some_and(|m| m.id == checkpoint.message_id);
-    let use_cloned_jsonl = cloned_jsonl && jsonl_matches_ui;
-    let prelude = if use_cloned_jsonl {
-        None
-    } else {
-        let seed: Vec<ChatMessage> = remaining
-            .iter()
-            .filter(|m| !matches!(m.role, ChatRole::System))
-            .cloned()
-            .collect();
-        agent::history_seeder::build_migration_prelude(&seed)
-    };
+    // A prompt-indexed jsonl cut already matches the remaining chat. A
+    // checkpoint-length clone is only safe when the remaining last row is
+    // the checkpoint anchor. Never stuff remaining turns into a prelude.
+    let use_cloned_jsonl = cloned_jsonl && (used_user_prompt_cut || jsonl_matches_ui);
 
     let snapshot = {
         let mut agents = state.agents.write().await;
@@ -208,10 +225,7 @@ pub async fn rollback_to_checkpoint(
                 posted_env_trust_warning: false,
                 pending_history_prelude: None,
             });
-        let snap = apply_migration_to_session(
-            session,
-            if use_cloned_jsonl { None } else { prelude },
-        );
+        let snap = apply_migration_to_session(session, None);
         if use_cloned_jsonl {
             session.session_id = new_claude_sid.clone();
             session.pending_history_prelude = None;
@@ -519,9 +533,52 @@ pub async fn load_completed_turns(
         .map_err(|e| e.to_string())
 }
 
+/// 1-based index of `from_id` among User rows (including steers). Matches
+/// how [`prefix_len_before_user_prompt`] counts human prompts in jsonl.
+fn user_prompt_ordinal(messages: &[ChatMessage], from_id: &str) -> Option<usize> {
+    let mut n = 0usize;
+    for m in messages {
+        if m.role != ChatRole::User {
+            continue;
+        }
+        n += 1;
+        if m.id == from_id {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Snapshot to restore files from: the latest file-bearing checkpoint on a
+/// row *before* the undone user prompt (the send-time snapshot for that
+/// prompt). Falls back to the mapped checkpoint.
+fn file_restore_checkpoint<'a>(
+    mapped: &'a ConversationCheckpoint,
+    all: &'a [ConversationCheckpoint],
+    messages: &[ChatMessage],
+    from_id: Option<&str>,
+) -> &'a ConversationCheckpoint {
+    let Some(from_id) = from_id else {
+        return mapped;
+    };
+    let Some(pos) = messages.iter().position(|m| m.id == from_id) else {
+        return mapped;
+    };
+    let before: std::collections::HashSet<&str> =
+        messages[..pos].iter().map(|m| m.id.as_str()).collect();
+    all.iter()
+        .filter(|cp| cp.has_file_state && before.contains(cp.message_id.as_str()))
+        .max_by_key(|cp| cp.turn_index)
+        .unwrap_or(mapped)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{hydrate_sweep_allowed, session_owns_live_process};
+    use super::{
+        file_restore_checkpoint, hydrate_sweep_allowed, session_owns_live_process,
+        user_prompt_ordinal,
+    };
+    use claudette::model::{ChatMessage, ChatRole, ConversationCheckpoint};
 
     /// Stand-in for `AgentSession`, which wraps a live child process.
     const HANDLE: &() = &();
@@ -596,5 +653,71 @@ mod tests {
             session.and_then(|s| s.active_pid),
             session.and_then(|s| s.persistent_session.as_ref()),
         ));
+    }
+
+    fn msg(id: &str, role: ChatRole, parent: Option<&str>) -> ChatMessage {
+        ChatMessage {
+            id: id.into(),
+            workspace_id: "ws".into(),
+            chat_session_id: "s".into(),
+            role,
+            content: String::new(),
+            cost_usd: None,
+            duration_ms: None,
+            created_at: String::new(),
+            thinking: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            parent_message_id: parent.map(str::to_string),
+        }
+    }
+
+    fn cp(id: &str, message_id: &str, turn: i32, has_files: bool) -> ConversationCheckpoint {
+        ConversationCheckpoint {
+            id: id.into(),
+            workspace_id: "ws".into(),
+            chat_session_id: "s".into(),
+            message_id: message_id.into(),
+            commit_hash: None,
+            has_file_state: has_files,
+            turn_index: turn,
+            message_count: 1,
+            created_at: String::new(),
+            jsonl_byte_len: None,
+            jsonl_session_id: None,
+        }
+    }
+
+    #[test]
+    fn user_prompt_ordinal_counts_steers() {
+        let messages = vec![
+            msg("u1", ChatRole::User, None),
+            msg("a1", ChatRole::Assistant, None),
+            msg("s1", ChatRole::User, Some("u1")),
+            msg("a2", ChatRole::Assistant, None),
+            msg("u2", ChatRole::User, None),
+        ];
+        assert_eq!(user_prompt_ordinal(&messages, "u1"), Some(1));
+        assert_eq!(user_prompt_ordinal(&messages, "s1"), Some(2));
+        assert_eq!(user_prompt_ordinal(&messages, "u2"), Some(3));
+        assert_eq!(user_prompt_ordinal(&messages, "a1"), None);
+    }
+
+    #[test]
+    fn file_restore_prefers_latest_snapshot_before_undone_user() {
+        let messages = vec![
+            msg("u1", ChatRole::User, None),
+            msg("th1", ChatRole::Assistant, None),
+            msg("a1", ChatRole::Assistant, None),
+            msg("u2", ChatRole::User, None),
+        ];
+        let early = cp("early", "th1", 0, true);
+        let send_time = cp("send", "a1", 1, true);
+        let mapped = early.clone();
+        let all = vec![early, send_time];
+        let chosen = file_restore_checkpoint(&mapped, &all, &messages, Some("u2"));
+        assert_eq!(chosen.id, "send");
     }
 }
