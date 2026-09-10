@@ -8,10 +8,10 @@ import { applyPlanModeMountDefault } from "../components/chat/planModePersistenc
 
 const WS_ID = "test-workspace";
 
-function makeQuestion(sessionId: string = WS_ID): AgentQuestion {
+function makeQuestion(sessionId: string = WS_ID, toolUseId = "tool-1"): AgentQuestion {
   return {
     sessionId,
-    toolUseId: "tool-1",
+    toolUseId,
     questions: [
       {
         question: "Pick a framework",
@@ -726,7 +726,7 @@ describe("agentQuestion lifecycle (per-workspace)", () => {
   it("setAgentQuestion stores question keyed by workspace", () => {
     const q = makeQuestion();
     useAppStore.getState().setAgentQuestion(q);
-    expect(useAppStore.getState().agentQuestions[WS_ID]).toEqual(q);
+    expect(useAppStore.getState().agentQuestions[WS_ID]).toEqual([q]);
   });
 
   it("clearAgentQuestion removes question for that workspace only", () => {
@@ -746,7 +746,7 @@ describe("agentQuestion lifecycle (per-workspace)", () => {
 
     expect(useAppStore.getState().toolActivities[WS_ID]).toEqual([]);
     expect(useAppStore.getState().completedTurns[WS_ID]).toHaveLength(1);
-    expect(useAppStore.getState().agentQuestions[WS_ID]).toEqual(q);
+    expect(useAppStore.getState().agentQuestions[WS_ID]).toEqual([q]);
   });
 
   it("agentQuestion persists across multiple finalizeTurn calls", () => {
@@ -756,7 +756,7 @@ describe("agentQuestion lifecycle (per-workspace)", () => {
     useAppStore.getState().finalizeTurn(WS_ID, 0);
     useAppStore.getState().finalizeTurn(WS_ID, 0);
 
-    expect(useAppStore.getState().agentQuestions[WS_ID]).toEqual(q);
+    expect(useAppStore.getState().agentQuestions[WS_ID]).toEqual([q]);
   });
 
   it("questions are isolated per workspace", () => {
@@ -765,8 +765,26 @@ describe("agentQuestion lifecycle (per-workspace)", () => {
     useAppStore.getState().setAgentQuestion(qa);
     useAppStore.getState().setAgentQuestion(qb);
 
-    expect(useAppStore.getState().agentQuestions["ws-a"]).toEqual(qa);
-    expect(useAppStore.getState().agentQuestions["ws-b"]).toEqual(qb);
+    expect(useAppStore.getState().agentQuestions["ws-a"]).toEqual([qa]);
+    expect(useAppStore.getState().agentQuestions["ws-b"]).toEqual([qb]);
+  });
+
+  it("keeps concurrent AskUserQuestion cards for the same session", () => {
+    const q1 = makeQuestion(WS_ID, "tool-1");
+    const q2 = makeQuestion(WS_ID, "tool-2");
+    q2.questions = [{ question: "Second?", options: [{ label: "A" }] }];
+    useAppStore.getState().setAgentQuestion(q1);
+    useAppStore.getState().setAgentQuestion(q2);
+    expect(useAppStore.getState().agentQuestions[WS_ID]).toEqual([q1, q2]);
+  });
+
+  it("clearAgentQuestion with toolUseId removes only that card", () => {
+    const q1 = makeQuestion(WS_ID, "tool-1");
+    const q2 = makeQuestion(WS_ID, "tool-2");
+    useAppStore.getState().setAgentQuestion(q1);
+    useAppStore.getState().setAgentQuestion(q2);
+    useAppStore.getState().clearAgentQuestion(WS_ID, "tool-1");
+    expect(useAppStore.getState().agentQuestions[WS_ID]).toEqual([q2]);
   });
 
   it("setAgentApproval stores approval keyed by session", () => {
@@ -795,7 +813,7 @@ describe("agentQuestion lifecycle (per-workspace)", () => {
           makeChatSession(WS_ID, { needs_attention: true, attention_kind: "Ask" }),
         ],
       },
-      agentQuestions: { [WS_ID]: makeQuestion(WS_ID) },
+      agentQuestions: { [WS_ID]: [makeQuestion(WS_ID)] },
       agentApprovals: { [WS_ID]: makeApproval(WS_ID) },
     });
 
@@ -813,7 +831,7 @@ describe("agentQuestion lifecycle (per-workspace)", () => {
           makeChatSession(WS_ID, { needs_attention: true, attention_kind: "Ask" }),
         ],
       },
-      agentQuestions: { [WS_ID]: makeQuestion(WS_ID) },
+      agentQuestions: { [WS_ID]: [makeQuestion(WS_ID)] },
       planApprovals: { [WS_ID]: makePlanApproval(WS_ID) },
     });
 

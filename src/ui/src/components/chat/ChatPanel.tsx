@@ -86,7 +86,7 @@ export function ChatPanel() {
     pendingCreateWorkspaceName,
     pendingForkSourceName,
     pendingPlan,
-    pendingQuestion,
+    pendingQuestions,
     pendingSteerContent,
     queuedMessages,
     removeQueuedMessage,
@@ -248,7 +248,7 @@ export function ChatPanel() {
     oldestMessageId,
     pendingApproval,
     pendingPlan,
-    pendingQuestion,
+    pendingQuestions,
     restoringChatScrollSessionsRef,
     selectedWorkspaceId,
     setChatMessages,
@@ -900,7 +900,7 @@ export function ChatPanel() {
           onStop={handleStop}
           pendingApproval={pendingApproval}
           pendingPlan={pendingPlan}
-          pendingQuestion={pendingQuestion}
+          pendingQuestions={pendingQuestions}
           pendingSteerContent={pendingSteerContent}
           processingRef={processingRef}
           queuedMessages={queuedMessages}

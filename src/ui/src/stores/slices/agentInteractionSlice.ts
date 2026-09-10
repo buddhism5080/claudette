@@ -98,7 +98,7 @@ function syncSessionAttention(
   state: AppState,
   sessionId: string,
   nextSources: {
-    agentQuestions?: Record<string, AgentQuestion>;
+    agentQuestions?: Record<string, AgentQuestion[]>;
     planApprovals?: Record<string, PlanApproval>;
     agentApprovals?: Record<string, AgentApproval>;
   },
@@ -107,7 +107,9 @@ function syncSessionAttention(
   const planApprovals = nextSources.planApprovals ?? state.planApprovals;
   const agentApprovals = nextSources.agentApprovals ?? state.agentApprovals;
   const hasPlan = Boolean(planApprovals[sessionId]);
-  const hasAsk = Boolean(agentQuestions[sessionId] || agentApprovals[sessionId]);
+  const hasAsk = Boolean(
+    (agentQuestions[sessionId]?.length ?? 0) > 0 || agentApprovals[sessionId],
+  );
   if (!hasPlan && !hasAsk) {
     return clearSessionAttention(state.sessionsByWorkspace, sessionId);
   }
@@ -127,9 +129,9 @@ function syncSessionAttention(
 }
 
 export interface AgentInteractionSlice {
-  agentQuestions: Record<string, AgentQuestion>;
+  agentQuestions: Record<string, AgentQuestion[]>;
   setAgentQuestion: (q: AgentQuestion) => void;
-  clearAgentQuestion: (sessionId: string) => void;
+  clearAgentQuestion: (sessionId: string, toolUseId?: string) => void;
 
   planApprovals: Record<string, PlanApproval>;
   setPlanApproval: (p: PlanApproval) => void;
@@ -180,12 +182,28 @@ export const createAgentInteractionSlice: StateCreator<
 > = (set) => ({
   agentQuestions: {},
   setAgentQuestion: (q) =>
-    set((s) => ({
-      agentQuestions: { ...s.agentQuestions, [q.sessionId]: q },
-    })),
-  clearAgentQuestion: (sessionId) =>
     set((s) => {
-      const { [sessionId]: _, ...rest } = s.agentQuestions;
+      const existing = s.agentQuestions[q.sessionId] ?? [];
+      const next = [
+        ...existing.filter((item) => item.toolUseId !== q.toolUseId),
+        q,
+      ];
+      return {
+        agentQuestions: { ...s.agentQuestions, [q.sessionId]: next },
+      };
+    }),
+  clearAgentQuestion: (sessionId, toolUseId) =>
+    set((s) => {
+      const current = s.agentQuestions[sessionId] ?? [];
+      const nextList = toolUseId
+        ? current.filter((item) => item.toolUseId !== toolUseId)
+        : [];
+      const rest = { ...s.agentQuestions };
+      if (nextList.length === 0) {
+        delete rest[sessionId];
+      } else {
+        rest[sessionId] = nextList;
+      }
       const nextSessions = syncSessionAttention(s, sessionId, {
         agentQuestions: rest,
       });

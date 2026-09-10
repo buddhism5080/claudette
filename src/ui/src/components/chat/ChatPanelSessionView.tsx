@@ -63,7 +63,7 @@ type ChatPanelSessionViewProps = Pick<
   | "messages"
   | "pendingApproval"
   | "pendingPlan"
-  | "pendingQuestion"
+  | "pendingQuestions"
   | "pendingSteerContent"
   | "queuedMessages"
   | "removeQueuedMessage"
@@ -160,7 +160,7 @@ export function ChatPanelSessionView({
   onStop,
   pendingApproval,
   pendingPlan,
-  pendingQuestion,
+  pendingQuestions,
   pendingSteerContent,
   processingRef,
   queuedMessages,
@@ -290,8 +290,9 @@ export function ChatPanelSessionView({
                   />
                 )}
 
-                {pendingQuestion && (
+                {pendingQuestions.map((pendingQuestion) => (
                   <AgentQuestionCard
+                    key={pendingQuestion.toolUseId}
                     question={pendingQuestion}
                     onRespond={async (answers) => {
                       if (!activeSessionId) return;
@@ -307,14 +308,14 @@ export function ChatPanelSessionView({
                           summary: rendered.split("\n")[0] || "answered",
                           status: "ok",
                         });
-                        clearAgentQuestion(sid);
+                        clearAgentQuestion(sid, toolUseId);
                       } catch (e) {
                         console.error("Failed to submit agent answer:", e);
                         setError(String(e));
                       }
                     }}
                   />
-                )}
+                ))}
 
                 {pendingPlan && selectedWorkspaceId && (
                   <PlanApprovalCard
@@ -394,7 +395,7 @@ export function ChatPanelSessionView({
                   </div>
                 )}
 
-                {isRunning && !pendingQuestion && !pendingPlan && !pendingApproval && (
+                {isRunning && pendingQuestions.length === 0 && !pendingPlan && !pendingApproval && (
                   <div
                     ref={processingRef}
                     className={styles.processing}

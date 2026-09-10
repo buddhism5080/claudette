@@ -45,7 +45,7 @@ type UseChatPanelSessionLifecycleOptions = Pick<
   | "oldestMessageId"
   | "pendingApproval"
   | "pendingPlan"
-  | "pendingQuestion"
+  | "pendingQuestions"
   | "selectedWorkspaceId"
   | "setChatMessages"
   | "setChatPagination"
@@ -77,7 +77,7 @@ export function useChatPanelSessionLifecycle({
   oldestMessageId,
   pendingApproval,
   pendingPlan,
-  pendingQuestion,
+  pendingQuestions,
   restoringChatScrollSessionsRef,
   selectedWorkspaceId,
   setChatMessages,
@@ -517,7 +517,7 @@ export function useChatPanelSessionLifecycle({
     if (
       completedTurnsCount > 0 ||
       activitiesCount > 0 ||
-      pendingQuestion ||
+      pendingQuestions.length > 0 ||
       pendingPlan ||
       pendingApproval
     ) {
@@ -526,7 +526,7 @@ export function useChatPanelSessionLifecycle({
   }, [
     completedTurnsCount,
     activitiesCount,
-    pendingQuestion,
+    pendingQuestions,
     pendingPlan,
     pendingApproval,
     handleContentChanged,

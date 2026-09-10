@@ -250,7 +250,9 @@ export function Dashboard() {
   const sortedWorkspaces = useMemo(() => {
     const rows = activeWorkspaces.map((ws) => {
       const wsSessions = sessionsByWorkspace[ws.id] ?? [];
-      const hasQuestion = wsSessions.some((s) => agentQuestions[s.id]);
+      const hasQuestion = wsSessions.some(
+        (s) => (agentQuestions[s.id]?.length ?? 0) > 0,
+      );
       const hasAgentApproval = wsSessions.some((s) => agentApprovals[s.id]);
       const hasPlan = wsSessions.some((s) => planApprovals[s.id]);
       const badge: "ask" | "plan" | "done" | null =

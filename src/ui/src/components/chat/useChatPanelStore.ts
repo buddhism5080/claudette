@@ -2,12 +2,13 @@ import { useTranslation } from "react-i18next";
 
 import { tooltipWithHotkey } from "../../hotkeys/display";
 import { isMacHotkeyPlatform } from "../../hotkeys/platform";
-import type { QueuedMessage } from "../../stores/useAppStore";
+import type { AgentQuestion, QueuedMessage } from "../../stores/useAppStore";
 import { useAppStore } from "../../stores/useAppStore";
 import { isWorkspaceEnvironmentPreparing } from "../../utils/workspaceEnvironment";
 import { EMPTY_ACTIVITIES } from "./chatConstants";
 
 const EMPTY_QUEUED_MESSAGES: QueuedMessage[] = [];
+const EMPTY_QUESTIONS: AgentQuestion[] = [];
 
 export function useChatPanelStore() {
   const { t } = useTranslation("chat");
@@ -153,8 +154,10 @@ export function useChatPanelStore() {
     activeSessionId ? (s.completedTurns[activeSessionId] || []).length : 0,
   );
   const setPermissionLevel = useAppStore((s) => s.setPermissionLevel);
-  const pendingQuestion = useAppStore((s) =>
-    activeSessionId ? s.agentQuestions[activeSessionId] ?? null : null,
+  const pendingQuestions = useAppStore((s) =>
+    activeSessionId
+      ? s.agentQuestions[activeSessionId] ?? EMPTY_QUESTIONS
+      : EMPTY_QUESTIONS,
   );
   const clearAgentQuestion = useAppStore((s) => s.clearAgentQuestion);
   const pendingPlan = useAppStore((s) =>
@@ -258,7 +261,7 @@ export function useChatPanelStore() {
     pendingCreateWorkspaceName,
     pendingForkSourceName,
     pendingPlan,
-    pendingQuestion,
+    pendingQuestions,
     pendingSteerContent,
     queuedMessages,
     removeQueuedMessage,
