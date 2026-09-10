@@ -75,7 +75,8 @@ fn bind_turn_tool_activity(
     Ok(())
 }
 
-const TURN_TOOL_ACTIVITY_SELECT: &str = "ta.id, ta.checkpoint_id, ta.user_message_id, ta.tool_use_id, ta.tool_name,
+const TURN_TOOL_ACTIVITY_SELECT: &str =
+    "ta.id, ta.checkpoint_id, ta.user_message_id, ta.tool_use_id, ta.tool_name,
                     ta.input_json, ta.result_text, ta.summary, ta.sort_order,
                     ta.assistant_message_ordinal, ta.agent_task_id,
                     ta.agent_description, ta.agent_last_tool_name,
@@ -290,6 +291,30 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(n != 0)
+    }
+
+    /// Prompt-time send may find a checkpoint already on the last row
+    /// (older first-tool snapshot). Refresh the recorded jsonl length so
+    /// rollback can restore by that integer without parsing the file.
+    pub fn update_checkpoint_jsonl_prefix(
+        &self,
+        chat_session_id: &str,
+        message_id: &str,
+        jsonl_byte_len: Option<i64>,
+        jsonl_session_id: Option<&str>,
+    ) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE conversation_checkpoints
+             SET jsonl_byte_len = ?3, jsonl_session_id = ?4
+             WHERE chat_session_id = ?1 AND message_id = ?2",
+            params![
+                chat_session_id,
+                message_id,
+                jsonl_byte_len,
+                jsonl_session_id
+            ],
+        )?;
+        Ok(n > 0)
     }
 
     /// Latest checkpoint for this session whose anchor is `message_id` or a
@@ -643,8 +668,8 @@ impl Database {
     }
 
     fn gzip_bytes(raw: &[u8]) -> Vec<u8> {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         use std::io::Write;
         let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
         if enc.write_all(raw).is_err() {
@@ -900,9 +925,8 @@ impl Database {
             let legacy_content: Option<Vec<u8>> = row.get(5)?;
             let blob_bytes: Option<Vec<u8>> = row.get(6)?;
             let compression: Option<String> = row.get(7)?;
-            let blob_bytes = blob_bytes.map(|b| {
-                Database::gunzip_if_needed(b, compression.as_deref())
-            });
+            let blob_bytes =
+                blob_bytes.map(|b| Database::gunzip_if_needed(b, compression.as_deref()));
             // Prefer blob bytes when the row has been deduped/backfilled;
             // fall back to the row's own column for legacy un-backfilled rows.
             let content = match (blob_sha256.as_ref(), blob_bytes, legacy_content) {
@@ -1823,6 +1847,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn update_checkpoint_jsonl_prefix_refreshes_recorded_length() {
+        let db = setup_db_with_workspace();
+        db.insert_chat_message(&make_chat_msg(&db, "m1", "w1", ChatRole::Assistant, "a1"))
+            .unwrap();
+        db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
+            .unwrap();
+        let sid = db
+            .default_session_id_for_workspace("w1")
+            .unwrap()
+            .expect("session");
+        assert!(
+            db.update_checkpoint_jsonl_prefix(&sid, "m1", Some(8192), Some("sid-2"))
+                .unwrap()
+        );
+        let got = db.get_checkpoint("cp1").unwrap().expect("row");
+        assert_eq!(got.jsonl_byte_len, Some(8192));
+        assert_eq!(got.jsonl_session_id.as_deref(), Some("sid-2"));
+    }
+
     // --- Turn tool activity tests ---
 
     #[test]
@@ -1841,7 +1885,10 @@ mod tests {
         db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "m1", 0))
             .unwrap();
         assert!(db.session_has_checkpoint_for_message(&sid, "m1").unwrap());
-        assert!(!db.session_has_checkpoint_for_message(&sid, "other").unwrap());
+        assert!(
+            !db.session_has_checkpoint_for_message(&sid, "other")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1849,20 +1896,28 @@ mod tests {
         let db = setup_db_with_workspace();
         db.insert_chat_message(&make_chat_msg(&db, "u1", "w1", ChatRole::User, "prompt"))
             .unwrap();
-        db.insert_chat_message(&make_chat_msg(&db, "a1", "w1", ChatRole::Assistant, "think"))
-            .unwrap();
+        db.insert_chat_message(&make_chat_msg(
+            &db,
+            "a1",
+            "w1",
+            ChatRole::Assistant,
+            "think",
+        ))
+        .unwrap();
         let sid = db
             .default_session_id_for_workspace("w1")
             .unwrap()
             .expect("default session");
-        assert!(!db
-            .session_has_checkpoint_on_or_after_message(&sid, "u1")
-            .unwrap());
+        assert!(
+            !db.session_has_checkpoint_on_or_after_message(&sid, "u1")
+                .unwrap()
+        );
         db.insert_checkpoint(&make_checkpoint(&db, "cp1", "w1", "a1", 0))
             .unwrap();
-        assert!(db
-            .session_has_checkpoint_on_or_after_message(&sid, "u1")
-            .unwrap());
+        assert!(
+            db.session_has_checkpoint_on_or_after_message(&sid, "u1")
+                .unwrap()
+        );
         assert_eq!(
             db.latest_checkpoint_id_on_or_after_message(&sid, "u1")
                 .unwrap()
@@ -2965,8 +3020,14 @@ mod tests {
             .unwrap();
         db.insert_chat_message(&make_chat_msg(&db, "u2", "w1", ChatRole::User, "next"))
             .unwrap();
-        db.insert_chat_message(&make_chat_msg(&db, "a2", "w1", ChatRole::Assistant, "later"))
-            .unwrap();
+        db.insert_chat_message(&make_chat_msg(
+            &db,
+            "a2",
+            "w1",
+            ChatRole::Assistant,
+            "later",
+        ))
+        .unwrap();
 
         let session = db
             .default_session_id_for_workspace("w1")
@@ -2982,8 +3043,14 @@ mod tests {
             .unwrap();
         db.insert_chat_message(&make_chat_msg(&db, "u2", "w1", ChatRole::User, "next"))
             .unwrap();
-        db.insert_chat_message(&make_chat_msg(&db, "a2", "w1", ChatRole::Assistant, "later"))
-            .unwrap();
+        db.insert_chat_message(&make_chat_msg(
+            &db,
+            "a2",
+            "w1",
+            ChatRole::Assistant,
+            "later",
+        ))
+        .unwrap();
 
         let deleted = db.delete_session_messages_from(&session, "u2").unwrap();
         assert_eq!(deleted, 2);
@@ -3055,11 +3122,7 @@ mod tests {
             .collect();
         assert_eq!(
             remaining,
-            vec![
-                "late-early".to_string(),
-                "u1".to_string(),
-                "a1".to_string()
-            ]
+            vec!["late-early".to_string(), "u1".to_string(), "a1".to_string()]
         );
     }
 
@@ -3998,7 +4061,7 @@ mod tests {
 
     #[test]
     fn cap_tool_result_text_truncates_long_payload() {
-        use crate::model::{cap_tool_result_text, TOOL_RESULT_TEXT_MAX_CHARS};
+        use crate::model::{TOOL_RESULT_TEXT_MAX_CHARS, cap_tool_result_text};
         let s = "x".repeat(TOOL_RESULT_TEXT_MAX_CHARS + 50);
         let capped = cap_tool_result_text(&s);
         assert!(capped.ends_with("…(truncated)"));

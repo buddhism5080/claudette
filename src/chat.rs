@@ -449,6 +449,26 @@ pub async fn create_turn_checkpoint_unless_present(
             .session_has_checkpoint_for_message(args.chat_session_id, args.anchor_msg_id)
             .unwrap_or(false)
     {
+        // Same row already has a restore point (e.g. first-tool). Do not
+        // mint another — but refresh jsonl_byte_len to "now", which is
+        // still previous-turn-end because this prompt has not been sent
+        // to the CLI yet.
+        if let Some(sid) = args.claude_session_id.filter(|s| !s.trim().is_empty()) {
+            if let Some(len) = crate::agent::claude_transcript_path(args.worktree_path, sid)
+                .ok()
+                .and_then(|p| p.metadata().ok())
+                .map(|m| m.len() as i64)
+            {
+                if len > 0 {
+                    let _ = db.update_checkpoint_jsonl_prefix(
+                        args.chat_session_id,
+                        args.anchor_msg_id,
+                        Some(len),
+                        Some(sid),
+                    );
+                }
+            }
+        }
         return None;
     }
     create_turn_checkpoint(args).await

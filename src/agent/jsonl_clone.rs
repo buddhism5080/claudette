@@ -99,67 +99,6 @@ pub fn remove_transcript(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Byte offset of the `nth` (1-based) human user prompt in a Claude CLI
-/// jsonl. Tool-result echoes (`type=user` + `tool_result` blocks) are not
-/// counted. Rollback uses this so the cloned prefix ends where the undone
-/// prompt begins — the same cut as the chat — instead of an earlier
-/// checkpoint's recorded length.
-pub fn prefix_len_before_user_prompt(source: &[u8], nth: usize) -> Option<u64> {
-    if nth == 0 {
-        return None;
-    }
-    let mut seen = 0usize;
-    let mut offset = 0usize;
-    for line in source.split_inclusive(|&b| b == b'\n') {
-        let body = if line.ends_with(&[b'\n']) {
-            &line[..line.len() - 1]
-        } else {
-            line
-        };
-        if !body.is_empty() && is_human_user_prompt_line(body) {
-            seen += 1;
-            if seen == nth {
-                return Some(offset as u64);
-            }
-        }
-        offset += line.len();
-    }
-    None
-}
-
-fn is_human_user_prompt_line(line: &[u8]) -> bool {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
-        return false;
-    };
-    if v.get("type").and_then(|t| t.as_str()) != Some("user") {
-        return false;
-    }
-    if v.get("isMeta").and_then(|t| t.as_bool()) == Some(true) {
-        return false;
-    }
-    match v.get("message").and_then(|m| m.get("content")) {
-        Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
-        Some(serde_json::Value::Array(blocks)) => {
-            if blocks
-                .iter()
-                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-            {
-                return false;
-            }
-            blocks.iter().any(|b| {
-                b.get("type").and_then(|t| t.as_str()) == Some("text")
-                    && b.get("text")
-                        .and_then(|t| t.as_str())
-                        .is_some_and(|s| !s.trim().is_empty())
-            })
-        }
-        _ => v
-            .get("text")
-            .and_then(|t| t.as_str())
-            .is_some_and(|s| !s.trim().is_empty()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,51 +171,5 @@ mod tests {
         remove_transcript(&src).unwrap();
         assert!(!src.exists());
         remove_transcript(&src).unwrap();
-    }
-
-    #[test]
-    fn prefix_before_first_user_prompt_is_zero() {
-        let u1 = line(r#"{"type":"user","message":{"role":"user","content":"first"}}"#);
-        assert_eq!(prefix_len_before_user_prompt(u1.as_bytes(), 1), Some(0));
-    }
-
-    #[test]
-    fn prefix_before_second_user_skips_tool_result_echoes() {
-        let u1 = line(r#"{"type":"user","message":{"role":"user","content":"first"}}"#);
-        let asst = line(r#"{"type":"assistant","message":{"content":[]}}"#);
-        let tool = line(
-            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
-        );
-        let u2 = line(
-            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"second"}]}}"#,
-        );
-        let src = format!("{u1}{asst}{tool}{u2}");
-        let cut = prefix_len_before_user_prompt(src.as_bytes(), 2).unwrap();
-        assert_eq!(cut as usize, u1.len() + asst.len() + tool.len());
-        let out = rebind_jsonl_prefix(src.as_bytes(), cut, "new");
-        let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("first"));
-        assert!(text.contains("tool_result"));
-        assert!(!text.contains("second"));
-    }
-
-    #[test]
-    fn prefix_before_missing_user_is_none() {
-        let u1 = line(r#"{"type":"user","message":{"role":"user","content":"only"}}"#);
-        assert!(prefix_len_before_user_prompt(u1.as_bytes(), 2).is_none());
-        assert!(prefix_len_before_user_prompt(u1.as_bytes(), 0).is_none());
-    }
-
-    #[test]
-    fn meta_user_lines_are_not_prompts() {
-        let meta = line(
-            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-stdout></local-command-stdout>"}}"#,
-        );
-        let u1 = line(r#"{"type":"user","message":{"role":"user","content":"real"}}"#);
-        let src = format!("{meta}{u1}");
-        assert_eq!(
-            prefix_len_before_user_prompt(src.as_bytes(), 1),
-            Some(meta.len() as u64)
-        );
     }
 }
