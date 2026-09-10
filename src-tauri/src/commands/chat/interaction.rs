@@ -102,10 +102,8 @@ pub async fn submit_agent_answer(
         }
         // 3. All checks passed — now it is safe to remove.
         let pending = session
-            .pending_permissions
-            .remove(&tool_use_id)
+            .take_pending_permission(&tool_use_id)
             .expect("checked above");
-        session.reset_attention();
         (pending, ps)
     };
 
@@ -163,8 +161,7 @@ async fn submit_mcp_answer(
                     p.tool_name
                 ));
             }
-            session.pending_permissions.remove(tool_use_id);
-            session.reset_attention();
+            session.take_pending_permission(tool_use_id);
         }
     }
     let Some(pending) = state.take_mcp_reply(tool_use_id).await else {

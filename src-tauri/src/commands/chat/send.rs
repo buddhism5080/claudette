@@ -3756,6 +3756,37 @@ mod tests {
     }
 
     #[test]
+    fn taking_one_ask_keeps_attention_when_another_is_still_pending() {
+        let mut session = test_agent_session_state();
+        queue_control_prompt(
+            &mut session,
+            "req-a".into(),
+            "AskUserQuestion".into(),
+            "tool-a".into(),
+            serde_json::json!({"question": "First?"}),
+        );
+        queue_control_prompt(
+            &mut session,
+            "req-b".into(),
+            "AskUserQuestion".into(),
+            "tool-b".into(),
+            serde_json::json!({"question": "Second?"}),
+        );
+
+        let taken = session.take_pending_permission("tool-a").unwrap();
+        assert_eq!(taken.request_id, "req-a");
+        assert!(session.pending_permissions.contains_key("tool-b"));
+        assert!(session.needs_attention);
+        assert_eq!(session.attention_kind, Some(AttentionKind::Ask));
+
+        let taken = session.take_pending_permission("tool-b").unwrap();
+        assert_eq!(taken.request_id, "req-b");
+        assert!(session.pending_permissions.is_empty());
+        assert!(!session.needs_attention);
+        assert_eq!(session.attention_kind, None);
+    }
+
+    #[test]
     fn control_request_route_allows_non_interactive_tool_in_bypass_mode() {
         let mut session = test_agent_session_state();
         session.session_allowed_tools = vec!["*".to_string()];

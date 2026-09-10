@@ -284,6 +284,16 @@ impl AgentSessionState {
         self.attention_notification_sent = false;
     }
 
+    /// Remove one pending control. Attention stays on if other prompts
+    /// are still waiting (two AskUserQuestion tools in one turn).
+    pub fn take_pending_permission(&mut self, tool_use_id: &str) -> Option<PendingPermission> {
+        let pending = self.pending_permissions.remove(tool_use_id)?;
+        if self.pending_permissions.is_empty() {
+            self.reset_attention();
+        }
+        Some(pending)
+    }
+
     pub fn remember_local_user_message_uuid(&mut self, uuid: String) {
         // Cap the set at 1024 entries — clear before inserting the entry that
         // would push us past the cap so the post-insert size never exceeds it.

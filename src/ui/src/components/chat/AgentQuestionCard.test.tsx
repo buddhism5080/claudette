@@ -108,4 +108,34 @@ describe("AgentQuestionCard", () => {
     await click(lint);
     expect(lint.getAttribute("aria-pressed")).toBe("false");
   });
+
+  it("submits every wizard question in one answers map", async () => {
+    const onRespond = vi.fn();
+    const question: AgentQuestion = {
+      sessionId: "s1",
+      toolUseId: "tool1",
+      questions: [
+        {
+          question: "How do you deploy?",
+          options: [{ label: "Nix" }, { label: "Docker" }],
+        },
+        {
+          question: "Testing?",
+          options: [{ label: "Unit" }, { label: "E2E" }],
+        },
+      ],
+    };
+
+    const container = await render(
+      <AgentQuestionCard question={question} onRespond={onRespond} />,
+    );
+    await click(buttonNamed(container, "Nix"));
+    expect(onRespond).not.toHaveBeenCalled();
+    await click(buttonNamed(container, "Unit"));
+    expect(onRespond).toHaveBeenCalledTimes(1);
+    expect(onRespond).toHaveBeenCalledWith({
+      "How do you deploy?": "Nix",
+      "Testing?": "Unit",
+    });
+  });
 });
