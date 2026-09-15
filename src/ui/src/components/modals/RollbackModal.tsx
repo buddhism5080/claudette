@@ -52,18 +52,31 @@ export function RollbackModal() {
             restoreFiles,
             messageId,
           );
+      // Cut the live transcript at the clicked user. Do not replace surviving
+      // rows with the backend list or reconstructCompletedTurns — that remounts
+      // earlier turns and piles tools above thinking/text.
+      const fromMessageId = isClearAll ? null : (messageId ?? undefined);
+      const existing = useAppStore.getState().chatMessages[sessionId] ?? [];
+      const canSlice =
+        fromMessageId === null ||
+        (!!fromMessageId && existing.some((m) => m.id === fromMessageId));
       rollbackConversation(
         sessionId,
         workspaceId,
         checkpointId ?? "__clear__",
         messages,
+        fromMessageId,
       );
-      loadCompletedTurns(sessionId)
-        .then((turnData) => {
-          const turns = reconstructCompletedTurns(messages, turnData);
-          useAppStore.getState().setCompletedTurns(sessionId, turns);
-        })
-        .catch((e) => console.error("Failed to reload turns after rollback:", e));
+      if (!canSlice) {
+        loadCompletedTurns(sessionId)
+          .then((turnData) => {
+            const turns = reconstructCompletedTurns(messages, turnData);
+            useAppStore.getState().setCompletedTurns(sessionId, turns);
+          })
+          .catch((e) =>
+            console.error("Failed to reload turns after rollback:", e),
+          );
+      }
       if (messageContent) {
         setChatInputPrefill(messageContent);
       }

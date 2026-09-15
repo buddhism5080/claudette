@@ -1543,6 +1543,164 @@ describe("rollbackConversation", () => {
     expect(useAppStore.getState().chatMessages[OTHER_WS]).toHaveLength(1);
     expect(useAppStore.getState().checkpoints[OTHER_WS]).toHaveLength(1);
   });
+
+  it("slices the live transcript at fromMessageId without replacing prior rows", () => {
+    const m1 = {
+      id: "m1",
+      workspace_id: WS_ID,
+      chat_session_id: WS_ID,
+      role: "User" as const,
+      content: "q1",
+      cost_usd: null,
+      duration_ms: null,
+      created_at: "",
+      thinking: null,
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+      cache_creation_tokens: null,
+    };
+    const m2 = {
+      ...m1,
+      id: "m2",
+      role: "Assistant" as const,
+      content: "",
+      thinking: "plan",
+    };
+    const m3 = {
+      ...m1,
+      id: "m3",
+      role: "Assistant" as const,
+      content: "done",
+    };
+    const m4 = { ...m1, id: "m4", content: "q2" };
+    const m5 = {
+      ...m1,
+      id: "m5",
+      role: "Assistant" as const,
+      content: "next",
+      thinking: "later",
+    };
+    const t1 = {
+      id: "t1",
+      messageCount: 2,
+      collapsed: true,
+      afterMessageIndex: 3,
+      activities: [
+        {
+          toolUseId: "tool-a",
+          toolName: "Read",
+          inputJson: "{}",
+          resultText: "ok",
+          collapsed: true,
+          summary: "read",
+          assistantMessageOrdinal: 1,
+        },
+      ],
+    };
+    const t2 = {
+      id: "t2",
+      messageCount: 1,
+      collapsed: true,
+      afterMessageIndex: 5,
+      activities: [
+        {
+          toolUseId: "tool-b",
+          toolName: "Bash",
+          inputJson: "{}",
+          resultText: "ok",
+          collapsed: true,
+          summary: "bash",
+          assistantMessageOrdinal: 0,
+        },
+      ],
+    };
+    useAppStore.setState({
+      chatMessages: { [WS_ID]: [m1, m2, m3, m4, m5] },
+      completedTurns: { [WS_ID]: [t1, t2] },
+      checkpoints: {
+        [WS_ID]: [
+          makeCheckpoint("cp1", WS_ID, "m3", 0),
+          makeCheckpoint("cp2", WS_ID, "m5", 1),
+        ],
+      },
+    });
+
+    const backendCopies = [
+      { ...m1, content: "q1-from-db" },
+      { ...m2, thinking: "plan-from-db" },
+      { ...m3, content: "done-from-db" },
+    ];
+    useAppStore
+      .getState()
+      .rollbackConversation(WS_ID, WS_ID, "cp1", backendCopies, "m4");
+
+    const remaining = useAppStore.getState().chatMessages[WS_ID];
+    expect(remaining).toHaveLength(3);
+    expect(remaining[0]).toBe(m1);
+    expect(remaining[1]).toBe(m2);
+    expect(remaining[2]).toBe(m3);
+    expect(remaining[0].content).toBe("q1");
+    expect(remaining[1].thinking).toBe("plan");
+
+    const turns = useAppStore.getState().completedTurns[WS_ID];
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toBe(t1);
+    expect(turns[0].activities[0].assistantMessageOrdinal).toBe(1);
+  });
+
+  it("keeps pagination hasMore when slicing the loaded window", () => {
+    const m1 = {
+      id: "m1",
+      workspace_id: WS_ID,
+      chat_session_id: WS_ID,
+      role: "User" as const,
+      content: "q1",
+      cost_usd: null,
+      duration_ms: null,
+      created_at: "",
+      thinking: null,
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+      cache_creation_tokens: null,
+    };
+    const m2 = {
+      ...m1,
+      id: "m2",
+      role: "Assistant" as const,
+      content: "a1",
+    };
+    const m3 = { ...m1, id: "m3", content: "q2" };
+    const m4 = {
+      ...m1,
+      id: "m4",
+      role: "Assistant" as const,
+      content: "a2",
+    };
+    useAppStore.setState({
+      chatMessages: { [WS_ID]: [m1, m2, m3, m4] },
+      chatPagination: {
+        [WS_ID]: {
+          hasMore: true,
+          isLoadingMore: false,
+          totalCount: 100,
+          oldestMessageId: "m1",
+        },
+      },
+      checkpoints: { [WS_ID]: [makeCheckpoint("cp1", WS_ID, "m2", 0)] },
+    });
+
+    useAppStore.getState().rollbackConversation(WS_ID, WS_ID, "cp1", [], "m3");
+
+    expect(useAppStore.getState().chatPagination[WS_ID]).toEqual({
+      hasMore: true,
+      isLoadingMore: false,
+      totalCount: 98,
+      oldestMessageId: "m1",
+    });
+    expect(useAppStore.getState().chatMessages[WS_ID]).toEqual([m1, m2]);
+  });
 });
 
 // rollbackConversation must reset chatPagination so the cursor and total
