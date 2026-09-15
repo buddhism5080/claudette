@@ -1,11 +1,16 @@
-# Fork-tester / workflow_dispatch Windows installer.
-# Official nightlies still come from nightly.yml + updater signing secrets.
-# This job produces an unsigned-Authenticode NSIS setup (SmartScreen will warn)
-# so a fork can ship a build of unreleased fixes without upstream secrets.
+# Fork-tester Windows installer. Official nightlies still come from
+# nightly.yml + updater signing secrets. This job produces an
+# unsigned-Authenticode NSIS setup (SmartScreen will warn).
 name: Windows sideload installer
 
 on:
   workflow_dispatch: {}
+  push:
+    branches: [main]
+
+concurrency:
+  group: windows-sideload
+  cancel-in-progress: true
 
 permissions:
   contents: read

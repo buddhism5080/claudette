@@ -1,17 +1,6 @@
 name: Nightly Build
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "site/**"
-      - "**/*.md"
-      - ".github/workflows/deploy-site.yml"
-      - ".github/workflows/conventional-commits.yml"
-      - ".github/workflows/update-frontend-hash.yml"
-      - ".github/workflows/release-please.yml"
-      - ".release-please-manifest.json"
-      - "CHANGELOG.md"
   workflow_dispatch: {}
 
 concurrency:

@@ -1,16 +1,6 @@
 name: Deploy Docs
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'site/**'
-      - '.github/workflows/deploy-site.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'site/**'
-      - '.github/workflows/deploy-site.yml'
   workflow_dispatch:
 
 permissions:
