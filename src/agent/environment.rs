@@ -9,13 +9,21 @@ const CLAUDE_CODE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
 const CLAUDE_CODE_DISABLE_TERMINAL_TITLE: &str = "CLAUDE_CODE_DISABLE_TERMINAL_TITLE";
 
 /// Claude Code fires a background Haiku request to title unnamed sessions
-/// and writes the result as a `custom-title` jsonl row. Live agent
-/// processes must leave that request enabled so Claudette can adopt the
-/// CLI's title instead of spawning a second Haiku. `--print` utilities
-/// still suppress it: they are not a session, and a title request there
-/// is wasted work (and a 499 on slow backends).
+/// and writes the result as an `ai-title` jsonl row (`/rename` / `--name`
+/// write `custom-title`). Live agent processes must leave that request
+/// enabled so Claudette can adopt the CLI's title instead of spawning a
+/// second Haiku. `--print` utilities still suppress it: they are not a
+/// session, and a title request there is wasted work (and a 499 on slow
+/// backends).
 pub(crate) fn suppress_cli_session_title_generation(cmd: &mut Command) {
     cmd.env(CLAUDE_CODE_DISABLE_TERMINAL_TITLE, "1");
+}
+
+/// Drop an inherited `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` so the live
+/// child can fire the CLI's own title Haiku. Does not override
+/// `~/.claude/settings.json` `env` — that is applied inside the CLI.
+pub(crate) fn allow_cli_session_title_generation(cmd: &mut Command) {
+    cmd.env_remove(CLAUDE_CODE_DISABLE_TERMINAL_TITLE);
 }
 
 /// Point Claude Code agent-team teammate launches back at the current
@@ -163,6 +171,15 @@ mod tests {
             })
             .and_then(std::ffi::OsStr::to_str);
         assert_eq!(actual, Some("1"));
+        super::allow_cli_session_title_generation(&mut cmd);
+        let after = cmd.as_std().get_envs().find_map(|(key, value)| {
+            (key == std::ffi::OsStr::new(super::CLAUDE_CODE_DISABLE_TERMINAL_TITLE))
+                .then_some(value)
+        });
+        assert!(
+            after.is_none() || after == Some(None),
+            "live spawn must unset CLAUDE_CODE_DISABLE_TERMINAL_TITLE, got {after:?}"
+        );
     }
 
     #[test]

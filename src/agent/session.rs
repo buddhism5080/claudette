@@ -15,7 +15,9 @@ use super::args::{
     build_settings_json, build_stdin_message_with_uuid, build_steering_stdin_message,
 };
 use super::binary::resolve_claude_path;
-use super::environment::{apply_teammate_command_override, build_agent_command};
+use super::environment::{
+    allow_cli_session_title_generation, apply_teammate_command_override, build_agent_command,
+};
 use super::process::{AgentEvent, TurnHandle};
 use super::types::{ControlResponsePayload, FileAttachment, StreamEvent, parse_stream_line};
 
@@ -123,6 +125,9 @@ impl PersistentSession {
         if let Some(env) = ws_env {
             env.apply(&mut cmd);
         }
+        // Last: never launch the live CLI with this set. Inherited user/workspace
+        // env or a parent process must not suppress the CLI's title Haiku.
+        allow_cli_session_title_generation(&mut cmd);
 
         // Claude Code's headless SDK path can otherwise let the process exit
         // after a Remote Control-origin turn leaves stdin idle. Claudette owns

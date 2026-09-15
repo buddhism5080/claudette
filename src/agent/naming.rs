@@ -151,25 +151,33 @@ pub fn claude_session_transcript_exists(worktree_path: &str, session_id: &str) -
     claude_transcript_path(worktree_path, session_id).is_ok_and(|p| p.is_file())
 }
 
-/// Latest `custom-title` row Claude Code wrote for this session.
-/// Auto-generated Haiku titles and `/rename` / `--name` all land as this
-/// jsonl type. Last matching `sessionId` wins; if none match, the last
-/// `custom-title` in this file is used — the jsonl is already one session.
+/// Latest CLI session title from this jsonl.
+///
+/// Claude Code writes auto-Haiku names as `ai-title` / `aiTitle`.
+/// `/rename`, `--name`, and hook `sessionTitle` write `custom-title`.
+/// Prefer the last `custom-title` (explicit) over the last `ai-title`.
 pub fn latest_custom_title(source: &str, session_id: &str) -> Option<String> {
     if session_id.trim().is_empty() {
         return None;
     }
-    let mut matched = None;
-    let mut any = None;
+    let mut custom_matched = None;
+    let mut custom_any = None;
+    let mut ai_matched = None;
+    let mut ai_any = None;
     for line in source.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if value.get("type").and_then(|v| v.as_str()) != Some("custom-title") {
+        let Some(kind) = value.get("type").and_then(|v| v.as_str()) else {
             continue;
-        }
+        };
+        let title_key = match kind {
+            "custom-title" => "customTitle",
+            "ai-title" => "aiTitle",
+            _ => continue,
+        };
         let Some(title) = value
-            .get("customTitle")
+            .get(title_key)
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|t| !t.is_empty())
@@ -177,14 +185,27 @@ pub fn latest_custom_title(source: &str, session_id: &str) -> Option<String> {
             continue;
         };
         let title: String = title.chars().take(60).collect();
-        any = Some(title.clone());
-        match value.get("sessionId").and_then(|v| v.as_str()) {
-            Some(sid) if sid == session_id => matched = Some(title),
-            None => matched = Some(title),
-            Some(_) => {}
+        let matches_sid = match value.get("sessionId").and_then(|v| v.as_str()) {
+            Some(sid) => sid == session_id,
+            None => true,
+        };
+        match kind {
+            "custom-title" => {
+                custom_any = Some(title.clone());
+                if matches_sid {
+                    custom_matched = Some(title);
+                }
+            }
+            "ai-title" => {
+                ai_any = Some(title.clone());
+                if matches_sid {
+                    ai_matched = Some(title);
+                }
+            }
+            _ => {}
         }
     }
-    matched.or(any)
+    custom_matched.or(ai_matched).or(custom_any).or(ai_any)
 }
 
 /// Persist a Claude Code custom title for a session transcript.
@@ -631,6 +652,27 @@ mod tests {
             latest_custom_title(src, "s1").as_deref(),
             Some("From CLI")
         );
+    }
+
+    #[test]
+    fn latest_custom_title_reads_ai_title_when_no_custom_title() {
+        let src = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"s1\"}\n",
+            "{\"type\":\"ai-title\",\"aiTitle\":\"Auth flow refactor\",\"sessionId\":\"s1\"}\n",
+        );
+        assert_eq!(
+            latest_custom_title(src, "s1").as_deref(),
+            Some("Auth flow refactor")
+        );
+    }
+
+    #[test]
+    fn latest_custom_title_prefers_custom_title_over_later_ai_title() {
+        let src = concat!(
+            "{\"type\":\"custom-title\",\"customTitle\":\"Pinned\",\"sessionId\":\"s1\"}\n",
+            "{\"type\":\"ai-title\",\"aiTitle\":\"Auto Haiku\",\"sessionId\":\"s1\"}\n",
+        );
+        assert_eq!(latest_custom_title(src, "s1").as_deref(), Some("Pinned"));
     }
 
     #[test]

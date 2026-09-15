@@ -11,7 +11,9 @@ use crate::process::sanitize_claude_subprocess_env;
 use super::AgentSettings;
 use super::args::{build_claude_args, build_stdin_message};
 use super::binary::resolve_claude_path;
-use super::environment::{apply_teammate_command_override, build_agent_command};
+use super::environment::{
+    allow_cli_session_title_generation, apply_teammate_command_override, build_agent_command,
+};
 use super::types::{FileAttachment, StreamEvent, parse_stream_line};
 
 /// Events emitted by an agent turn (stream events + process lifecycle).
@@ -127,6 +129,9 @@ pub async fn run_turn(
     if let Some(env) = ws_env {
         env.apply(&mut cmd);
     }
+    // Last: never launch the live CLI with this set. Inherited user/workspace
+    // env or a parent process must not suppress the CLI's title Haiku.
+    allow_cli_session_title_generation(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| {
         crate::missing_cli::map_spawn_err(&e, "claude", || {
