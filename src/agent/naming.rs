@@ -151,22 +151,21 @@ pub fn claude_session_transcript_exists(worktree_path: &str, session_id: &str) -
     claude_transcript_path(worktree_path, session_id).is_ok_and(|p| p.is_file())
 }
 
-/// Latest `custom-title` row Claude Code wrote for this session id.
+/// Latest `custom-title` row Claude Code wrote for this session.
 /// Auto-generated Haiku titles and `/rename` / `--name` all land as this
-/// jsonl type. Last matching row wins.
+/// jsonl type. Last matching `sessionId` wins; if none match, the last
+/// `custom-title` in this file is used — the jsonl is already one session.
 pub fn latest_custom_title(source: &str, session_id: &str) -> Option<String> {
     if session_id.trim().is_empty() {
         return None;
     }
-    let mut found = None;
+    let mut matched = None;
+    let mut any = None;
     for line in source.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
         if value.get("type").and_then(|v| v.as_str()) != Some("custom-title") {
-            continue;
-        }
-        if value.get("sessionId").and_then(|v| v.as_str()) != Some(session_id) {
             continue;
         }
         let Some(title) = value
@@ -177,9 +176,15 @@ pub fn latest_custom_title(source: &str, session_id: &str) -> Option<String> {
         else {
             continue;
         };
-        found = Some(title.chars().take(60).collect());
+        let title: String = title.chars().take(60).collect();
+        any = Some(title.clone());
+        match value.get("sessionId").and_then(|v| v.as_str()) {
+            Some(sid) if sid == session_id => matched = Some(title),
+            None => matched = Some(title),
+            Some(_) => {}
+        }
     }
-    found
+    matched.or(any)
 }
 
 /// Persist a Claude Code custom title for a session transcript.
@@ -611,7 +616,21 @@ mod tests {
             latest_custom_title(src, "s2").as_deref(),
             Some("Other session")
         );
-        assert_eq!(latest_custom_title(src, "missing"), None);
+        // This jsonl is one session file: if sessionId doesn't match,
+        // still take the last custom-title rather than leaving the prompt fallback.
+        assert_eq!(
+            latest_custom_title(src, "missing").as_deref(),
+            Some("Other session")
+        );
+    }
+
+    #[test]
+    fn latest_custom_title_accepts_row_without_session_id() {
+        let src = "{\"type\":\"custom-title\",\"customTitle\":\"From CLI\"}\n";
+        assert_eq!(
+            latest_custom_title(src, "s1").as_deref(),
+            Some("From CLI")
+        );
     }
 
     #[test]

@@ -152,7 +152,7 @@ pub(crate) async fn try_adopt_cli_session_title(
     let Ok(path) = agent::claude_transcript_path(worktree_path, claude_sid) else {
         return;
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     loop {
         if let Ok(contents) = std::fs::read_to_string(&path)
             && let Some(title) = agent::latest_custom_title(&contents, claude_sid)
@@ -171,6 +171,13 @@ pub(crate) async fn try_adopt_cli_session_title(
             return;
         }
         if std::time::Instant::now() >= deadline {
+            tracing::info!(
+                target: "claudette::chat",
+                chat_session_id = %chat_session_id,
+                claude_sid = %claude_sid,
+                jsonl = %path.display(),
+                "CLI custom-title did not land within 90s; keeping prompt fallback"
+            );
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;

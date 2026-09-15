@@ -53,6 +53,7 @@ fn validate_file_path(file_path: &str) -> Result<(), DiffError> {
 async fn run_git(path: &str, args: &[&str]) -> Result<String, DiffError> {
     let output = crate::process::command(crate::git::resolve_git_path_blocking())
         .args(["-C", path])
+        .args(["-c", "core.quotepath=false"])
         .args(args)
         .output()
         .await
@@ -64,6 +65,68 @@ async fn run_git(path: &str, args: &[&str]) -> Result<String, DiffError> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         Err(DiffError::CommandFailed(stderr))
     }
+}
+
+/// Decode a Git `core.quotepath` C-quoted path (`"docs/\344\275\277.md"`)
+/// into UTF-8. Unquoted paths are returned unchanged.
+fn unquote_git_path(raw: &str) -> String {
+    let s = raw.trim();
+    let Some(inner) = s.strip_prefix('"') else {
+        return s.to_string();
+    };
+    let inner = inner.strip_suffix('"').unwrap_or(inner);
+    let bytes = inner.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if i >= bytes.len() {
+            out.push(b'\\');
+            break;
+        }
+        match bytes[i] {
+            b'n' => {
+                out.push(b'\n');
+                i += 1;
+            }
+            b't' => {
+                out.push(b'\t');
+                i += 1;
+            }
+            b'r' => {
+                out.push(b'\r');
+                i += 1;
+            }
+            b'\\' => {
+                out.push(b'\\');
+                i += 1;
+            }
+            b'"' => {
+                out.push(b'"');
+                i += 1;
+            }
+            c if (b'0'..=b'7').contains(&c) => {
+                let mut val = 0u8;
+                let mut n = 0;
+                while n < 3 && i < bytes.len() && (b'0'..=b'7').contains(&bytes[i]) {
+                    val = val.wrapping_mul(8).wrapping_add(bytes[i] - b'0');
+                    i += 1;
+                    n += 1;
+                }
+                out.push(val);
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Get the merge base between two refs.
@@ -500,7 +563,7 @@ fn parse_untracked(output: &str) -> Vec<DiffFile> {
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(|path| DiffFile {
-            path: path.to_string(),
+            path: unquote_git_path(path),
             status: FileStatus::Added,
             additions: None,
             deletions: None,
@@ -517,7 +580,7 @@ fn apply_numstat(files: &mut [DiffFile], numstat_output: &str) {
             if parts.len() >= 3 {
                 let adds = parts[0].parse::<u32>().ok()?;
                 let dels = parts[1].parse::<u32>().ok()?;
-                let path = parts[2..].join(" ");
+                let path = unquote_git_path(&parts[2..].join(" "));
                 Some((path, (adds, dels)))
             } else {
                 None
@@ -551,14 +614,14 @@ fn parse_name_status_line(line: &str) -> Option<DiffFile> {
 
     let mut parts = line.split('\t');
     let status_str = parts.next()?;
-    let path = parts.next()?.to_string();
+    let path = unquote_git_path(parts.next()?);
 
     let status = match status_str.chars().next()? {
         'A' => FileStatus::Added,
         'M' => FileStatus::Modified,
         'D' => FileStatus::Deleted,
         'R' => {
-            let new_path = parts.next()?.to_string();
+            let new_path = unquote_git_path(parts.next()?);
             // For renames, the format is "R###\told_path\tnew_path"
             // We want the DiffFile to represent the new path
             return Some(DiffFile {
@@ -1127,6 +1190,34 @@ mod tests {
     fn test_parse_name_status_empty() {
         assert!(parse_name_status_line("").is_none());
         assert!(parse_name_status_line("   ").is_none());
+    }
+
+    #[test]
+    fn unquote_git_path_decodes_c_style_octal() {
+        assert_eq!(unquote_git_path("src/app.rs"), "src/app.rs");
+        assert_eq!(
+            unquote_git_path(r#""docs/\344\275\277\347\224\250\350\257\264\346\230\216.md""#),
+            "docs/使用说明.md"
+        );
+        assert_eq!(unquote_git_path(r#""foo\"bar.md""#), "foo\"bar.md");
+    }
+
+    #[test]
+    fn parse_untracked_decodes_quoted_cjk_path() {
+        let files = parse_untracked(r#""docs/\344\275\277\347\224\250\350\257\264\346\230\216.md""#);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "docs/使用说明.md");
+        assert_eq!(files[0].status, FileStatus::Added);
+    }
+
+    #[test]
+    fn parse_name_status_decodes_quoted_cjk_path() {
+        let file = parse_name_status_line(
+            "A\t\"docs/\\344\\275\\277\\347\\224\\250\\350\\257\\264\\346\\230\\216.md\"",
+        )
+        .unwrap();
+        assert_eq!(file.path, "docs/使用说明.md");
+        assert_eq!(file.status, FileStatus::Added);
     }
 
     #[test]
