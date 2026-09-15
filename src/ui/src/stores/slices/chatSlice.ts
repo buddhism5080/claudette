@@ -195,6 +195,11 @@ export interface ChatSlice {
    *  the run settles; the result is then appended as a normal message. */
   runningSetupScripts: Record<string, string>;
   setRunningSetupScript: (sessionId: string, label: string | null) => void;
+  /** True between Stop click and ProcessExited/result so token deltas
+   *  cannot keep occupying the UI thread. */
+  sessionsStopping: Record<string, true>;
+  markSessionStopping: (sessionId: string) => void;
+  clearSessionStopping: (sessionId: string) => void;
   setStreamingContent: (sessionId: string, content: string) => void;
   appendStreamingContent: (sessionId: string, text: string) => void;
   setPendingTypewriter: (sessionId: string, messageId: string, text: string) => void;
@@ -488,6 +493,20 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
       return {
         runningSetupScripts: { ...s.runningSetupScripts, [sessionId]: label },
       };
+    }),
+  sessionsStopping: {},
+  markSessionStopping: (sessionId) =>
+    set((s) =>
+      s.sessionsStopping[sessionId]
+        ? {}
+        : { sessionsStopping: { ...s.sessionsStopping, [sessionId]: true } },
+    ),
+  clearSessionStopping: (sessionId) =>
+    set((s) => {
+      if (!(sessionId in s.sessionsStopping)) return {};
+      const next = { ...s.sessionsStopping };
+      delete next[sessionId];
+      return { sessionsStopping: next };
     }),
   setStreamingContent: (sessionId, content) =>
     set((s) => ({

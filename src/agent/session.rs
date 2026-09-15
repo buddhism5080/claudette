@@ -432,6 +432,36 @@ impl PersistentSession {
         Ok(())
     }
 
+    /// Ask the live Claude CLI to abort the current turn via the SDK
+    /// `control_request` / `interrupt` subtype (same stdin as user turns).
+    ///
+    /// Bounded: a death-loop reply can fill the stdin pipe so `write_all`
+    /// never returns. Callers must still force-kill the process.
+    pub async fn interrupt_turn(&self) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+        let write = async {
+            let request_id = format!("claudette-interrupt-{}", uuid::Uuid::new_v4());
+            let message = build_interrupt_message(&request_id);
+            let mut stdin = self.stdin.lock().await;
+            stdin
+                .write_all(message.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write interrupt control_request: {e}"))?;
+            stdin
+                .write_all(b"\n")
+                .await
+                .map_err(|e| format!("Failed to write interrupt control_request newline: {e}"))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| format!("Failed to flush interrupt control_request: {e}"))?;
+            Ok::<(), String>(())
+        };
+        tokio::time::timeout(std::time::Duration::from_millis(200), write)
+            .await
+            .map_err(|_| "interrupt stdin write timed out".to_string())?
+    }
+
     /// Enable or disable Claude Code Remote Control for this persistent
     /// stream-json session. The Claude CLI owns the actual bridge; Claudette
     /// only sends the control request and waits for the matching response.
@@ -507,6 +537,17 @@ fn build_task_stop_message(request_id: &str, task_id: &str) -> String {
         "request": {
             "subtype": "stop_task",
             "task_id": task_id,
+        },
+    })
+    .to_string()
+}
+
+fn build_interrupt_message(request_id: &str) -> String {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {
+            "subtype": "interrupt",
         },
     })
     .to_string()
@@ -986,6 +1027,15 @@ mod tests {
         assert_eq!(parsed["request_id"], "req_123");
         assert_eq!(parsed["request"]["subtype"], "stop_task");
         assert_eq!(parsed["request"]["task_id"], "task_123");
+    }
+
+    #[test]
+    fn build_interrupt_message_writes_sdk_interrupt_shape() {
+        let raw = build_interrupt_message("req_int");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["type"], "control_request");
+        assert_eq!(parsed["request_id"], "req_int");
+        assert_eq!(parsed["request"]["subtype"], "interrupt");
     }
 
     #[test]

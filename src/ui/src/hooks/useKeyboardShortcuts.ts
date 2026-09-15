@@ -118,6 +118,7 @@ export function useKeyboardShortcuts() {
                     chat_session_id: sessionId,
                   })
                 : stopAgent(sessionId);
+              useAppStore.getState().markSessionStopping(sessionId);
               stopPromise.catch(console.error);
               // Don't write workspace-level agent_status here: this stops only
               // the active session. The backend's ProcessExited event will

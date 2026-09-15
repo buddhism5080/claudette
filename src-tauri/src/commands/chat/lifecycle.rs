@@ -86,18 +86,32 @@ pub async fn stop_agent(
     // oneshot, not the CLI — drop their channels so a suspended tool call gets a
     // cancelled result instead of hanging after the user stops the session.
     state.drain_mcp_replies_for_session(&chat_session_id).await;
+    // Interrupt asks the CLI to abort the in-flight API stream. A death-loop
+    // reply can fill stdin so that write never completes — bound it, then
+    // always kill. Previously Claude's interrupt_turn *was* the kill, so a
+    // hung stdin path never existed; after switching to SDK `interrupt`,
+    // skipping the kill on Ok(()) would leave the looping process alive.
     if let Some(ps) = interrupt_session {
-        if let Err(err) = ps.interrupt_turn().await {
-            tracing::warn!(
-                target: "claudette::chat",
-                error = %err,
-                "agent protocol interrupt failed; falling back to process kill"
-            );
-            if let Some(pid) = pid_to_kill {
-                agent::stop_agent(pid).await?;
+        match tokio::time::timeout(std::time::Duration::from_millis(200), ps.interrupt_turn())
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    target: "claudette::chat",
+                    error = %err,
+                    "agent protocol interrupt failed; killing process"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "claudette::chat",
+                    "agent protocol interrupt timed out; killing process"
+                );
             }
         }
-    } else if let Some(pid) = pid_to_kill {
+    }
+    if let Some(pid) = pid_to_kill {
         agent::stop_agent(pid).await?;
     }
 

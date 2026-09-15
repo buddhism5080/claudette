@@ -455,6 +455,20 @@ fn should_run_auto_naming(_remote_control_active: bool) -> bool {
     true
 }
 
+/// Token deltas after Stop has cleared `active_pid`. Emitting them floods
+/// the webview so the click never lands and ProcessExited sits behind the
+/// queue. Skip them (and skip when the agents lock is contended — Stop is
+/// taking the write lock).
+fn should_skip_live_tokens_after_stop(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::Stream(StreamEvent::Stream {
+            event: InnerStreamEvent::ContentBlockDelta { .. }
+                | InnerStreamEvent::MessageDelta { .. }
+        })
+    )
+}
+
 fn should_reenable_remote_control_after_turn_result(
     should_restore: bool,
     status: &ClaudeRemoteControlStatus,
@@ -2633,6 +2647,19 @@ pub async fn send_chat_message(
         let mut notified_via_result = false;
         let mut assistant_auth_failure_seen = false;
         while let Some(event) = rx.recv().await {
+            if should_skip_live_tokens_after_stop(&event) {
+                let app_state = app.state::<AppState>();
+                let skip = match app_state.agents.try_read() {
+                    Ok(agents) => agents
+                        .get(&chat_session_id_for_stream)
+                        .map(|s| s.active_pid != Some(spawned_pid))
+                        .unwrap_or(true),
+                    Err(_) => true,
+                };
+                if skip {
+                    continue;
+                }
+            }
             if let AgentEvent::Stderr(line) = &event {
                 stderr_lines.push(line.clone());
             }
@@ -3624,6 +3651,7 @@ mod tests {
         auth_failure_message_from_stderr, env_provider_drifted_parts, has_env_trust_warning,
         queue_control_prompt, remote_control_requested_or_active,
         remote_control_requested_or_active_for_turn,
+        should_skip_live_tokens_after_stop,
         remote_control_should_defer_drift_teardown_for_turn,
         remote_control_should_restore_for_turn, remote_control_title, resolve_spawn_session_id,
         route_control_request_session_state, should_reenable_remote_control_after_turn_result,
@@ -4282,5 +4310,29 @@ mod tests {
             AgentBackendRuntimeHarness::ClaudeCode,
             "/compact",
         ));
+    }
+
+    #[test]
+    fn skip_live_tokens_after_stop_matches_deltas_only() {
+        use claudette::agent::{AgentEvent, Delta, InnerStreamEvent, StreamEvent};
+        let delta = AgentEvent::Stream(StreamEvent::Stream {
+            event: InnerStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::Text { text: "x".into() },
+            },
+        });
+        assert!(should_skip_live_tokens_after_stop(&delta));
+        assert!(!should_skip_live_tokens_after_stop(&AgentEvent::ProcessExited(
+            Some(0)
+        )));
+        assert!(!should_skip_live_tokens_after_stop(&AgentEvent::Stream(
+            StreamEvent::Result {
+                subtype: "success".into(),
+                result: None,
+                total_cost_usd: None,
+                duration_ms: None,
+                usage: None,
+            }
+        )));
     }
 }

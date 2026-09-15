@@ -39,6 +39,13 @@ import { buildCompactionSentinel } from "../utils/compactionSentinel";
 import { pickMeterUsageFromResult } from "./pickMeterUsageFromResult";
 import { setPlanModeAndPersist } from "../components/chat/planModePersistence";
 import {
+  dropQueuedDeltasForSession,
+  isTerminalAgentEvent,
+  isTokenDeltaEvent,
+  shouldDropStoppedTokenDelta,
+  takeQueuedDeltas,
+} from "./streamStop";
+import {
   applyCommandLineEvent,
   approvalDetailValue,
   applyCompleteAssistantThinking,
@@ -402,7 +409,10 @@ export function useAgentStream() {
     // briefly coexist with the new one. This flag prevents the stale
     // listener from processing events.
     let active = true;
-    const unlisten = listen<AgentStreamPayload>("agent-stream", (event) => {
+    const deltaQueue: AgentStreamPayload[] = [];
+    let deltaRaf = 0;
+
+    const onStream = (event: { payload: AgentStreamPayload }) => {
       if (!active) return;
       const {
         workspace_id: wsId,
@@ -1000,10 +1010,55 @@ export function useAgentStream() {
           }
         }
       }
+    };
+
+    const flushDeltas = () => {
+      deltaRaf = 0;
+      if (!active) return;
+      const stopping = useAppStore.getState().sessionsStopping;
+      const batch = takeQueuedDeltas(deltaQueue);
+      for (const payload of batch) {
+        if (
+          shouldDropStoppedTokenDelta(
+            !!stopping[payload.chat_session_id],
+            payload.event,
+          )
+        ) {
+          continue;
+        }
+        onStream({ payload });
+      }
+      if (deltaQueue.length > 0) {
+        deltaRaf = requestAnimationFrame(flushDeltas);
+      }
+    };
+
+    const unlisten = listen<AgentStreamPayload>("agent-stream", (event) => {
+      if (!active) return;
+      const payload = event.payload;
+      const stopping =
+        !!useAppStore.getState().sessionsStopping[payload.chat_session_id];
+      if (shouldDropStoppedTokenDelta(stopping, payload.event)) {
+        return;
+      }
+      if (isTokenDeltaEvent(payload.event)) {
+        deltaQueue.push(payload);
+        if (!deltaRaf) {
+          deltaRaf = requestAnimationFrame(flushDeltas);
+        }
+        return;
+      }
+      if (isTerminalAgentEvent(payload.event)) {
+        dropQueuedDeltasForSession(deltaQueue, payload.chat_session_id);
+        useAppStore.getState().clearSessionStopping(payload.chat_session_id);
+      }
+      onStream(event);
     });
 
     return () => {
       active = false;
+      if (deltaRaf) cancelAnimationFrame(deltaRaf);
+      deltaQueue.length = 0;
       unlisten.then((fn) => fn());
     };
   }, [

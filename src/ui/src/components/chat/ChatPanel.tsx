@@ -774,6 +774,7 @@ export function ChatPanel() {
       setQueuedMessageEditing(sessionId, false);
     }
     try {
+      useAppStore.getState().markSessionStopping(sessionId);
       if (ws?.remote_connection_id) {
         await sendRemoteCommand(ws.remote_connection_id, "stop_agent", {
           chat_session_id: sessionId,
