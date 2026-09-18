@@ -28,6 +28,7 @@ import {
   buildPlainTurnFooters,
   findTriggeringUserIndex,
   lastTurnStartUserIndex,
+  toolActivityRenderPosition,
 } from "../../utils/chatTurnFooter";
 import {
   parseCompactionSentinel,
@@ -366,35 +367,19 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
     }
 
     completedTurns.forEach((turn, globalIdx) => {
-      const localAfter = turn.afterMessageIndex - globalOffset;
       const userIdx = findTriggeringUserIdx(turn.afterMessageIndex);
-      const assistantPositions: number[] = [];
-
-      if (userIdx !== -1) {
-        const end = Math.min(localAfter, messages.length);
-        for (let idx = userIdx + 1; idx < end; idx++) {
-          if (messages[idx]?.role === "Assistant") {
-            assistantPositions.push(globalOffset + idx + 1);
-          }
-        }
-      }
-
-      const positionForOrdinal = (ordinal: number | undefined) => {
-        if (userIdx === -1) return turn.afterMessageIndex;
-        if (typeof ordinal !== "number" || ordinal < 0) {
-          return turn.afterMessageIndex;
-        }
-        const safeOrdinal = ordinal;
-        if (safeOrdinal === 0) return globalOffset + userIdx + 1;
-        return assistantPositions[safeOrdinal - 1] ?? turn.afterMessageIndex;
-      };
 
       const activitiesByPosition = new Map<
         number,
         CompletedTurn["activities"]
       >();
       for (const activity of turn.activities) {
-        const position = positionForOrdinal(activity.assistantMessageOrdinal);
+        const position = toolActivityRenderPosition(
+          messages,
+          activity,
+          globalOffset,
+          userIdx,
+        );
         const existing = activitiesByPosition.get(position);
         if (existing) existing.push(activity);
         else activitiesByPosition.set(position, [activity]);
@@ -460,25 +445,13 @@ export const MessagesWithTurns = memo(function MessagesWithTurns({
 
     const userIdx = lastTurnStartUserIndex(messages);
 
-    const assistantPositions: number[] = [];
-    if (userIdx !== -1) {
-      for (let idx = userIdx + 1; idx < messages.length; idx++) {
-        if (messages[idx]?.role === "Assistant") {
-          assistantPositions.push(globalOffset + idx + 1);
-        }
-      }
-    }
-
-    const positionForOrdinal = (ordinal: number | undefined) => {
-      const tailPosition = globalOffset + messages.length;
-      if (userIdx === -1) return tailPosition;
-      if (typeof ordinal !== "number" || ordinal < 0) return tailPosition;
-      if (ordinal === 0) return globalOffset + userIdx + 1;
-      return assistantPositions[ordinal - 1] ?? tailPosition;
-    };
-
     for (const activity of liveToolActivities) {
-      const position = positionForOrdinal(activity.assistantMessageOrdinal);
+      const position = toolActivityRenderPosition(
+        messages,
+        activity,
+        globalOffset,
+        userIdx,
+      );
       const existing = activitiesByPosition.get(position);
       if (existing) existing.push(activity);
       else activitiesByPosition.set(position, [activity]);

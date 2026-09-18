@@ -1661,5 +1661,125 @@ describe("MessagesWithTurns live stream order", () => {
     expect(text).toContain("grok-search-rs");
     expect(text.indexOf("grok-search-rs")).toBeLessThan(text.indexOf("don't edit yet"));
   });
+
+  it("does not move live tools below a later turn-start user", async () => {
+    const prompt = message("user-1", "User", "fix the indent");
+    const first = message("assistant-1", "Assistant", "再跑编译和测试。");
+    const next = message("user-2", "User", "继续");
+    useAppStore.setState({
+      toolActivities: {
+        [SESSION_ID]: [
+          {
+            toolUseId: "fastctx-1",
+            toolName: "mcp__fastctx__search",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "query",
+            assistantMessageOrdinal: 0,
+            turnStartUserId: "user-1",
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[prompt, first, next]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("fastctx");
+    expect(text.indexOf("再跑编译和测试")).toBeLessThan(text.indexOf("fastctx"));
+    expect(text.indexOf("fastctx")).toBeLessThan(text.indexOf("继续"));
+  });
+
+  it("does not move completed-turn tools below a later turn-start user", async () => {
+    const prompt = message("user-1", "User", "fix the indent");
+    const first = message("assistant-1", "Assistant", "再跑编译和测试。");
+    const next = message("user-2", "User", "继续");
+    useAppStore.setState({
+      completedTurns: {
+        [SESSION_ID]: [
+          {
+            id: "turn-1",
+            activities: [
+              {
+                toolUseId: "fastctx-1",
+                toolName: "mcp__fastctx__search",
+                inputJson: "{}",
+                resultText: "ok",
+                collapsed: true,
+                summary: "query",
+                assistantMessageOrdinal: 0,
+                turnStartUserId: "user-1",
+              },
+            ],
+            messageCount: 2,
+            collapsed: true,
+            afterMessageIndex: 3,
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[prompt, first, next]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning={false}
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("fastctx");
+    expect(text.indexOf("fastctx")).toBeLessThan(text.indexOf("继续"));
+  });
+
+  it("places new-turn live tools after the new user, not in the previous turn", async () => {
+    const prompt = message("user-1", "User", "fix the indent");
+    const first = message("assistant-1", "Assistant", "再跑编译和测试。");
+    const next = message("user-2", "User", "继续");
+    useAppStore.setState({
+      toolActivities: {
+        [SESSION_ID]: [
+          {
+            toolUseId: "bash-new",
+            toolName: "mcp__newturn__run",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "run",
+            assistantMessageOrdinal: 0,
+            turnStartUserId: "user-2",
+          },
+        ],
+      },
+    });
+
+    const container = await render(
+      <MessagesWithTurns
+        messages={[prompt, first, next]}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        isRunning
+        searchQuery=""
+        toolDisplayMode="grouped"
+      />,
+    );
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("newturn");
+    expect(text.indexOf("继续")).toBeLessThan(text.indexOf("newturn"));
+  });
 });
 

@@ -1003,6 +1003,59 @@ describe("finalizeTurn afterMessageIndex", () => {
     expect(turns[0].collapsed).toBe(true);
   });
 
+  it("stops afterMessageIndex before a later turn-start user", () => {
+    useAppStore.setState({
+      chatMessages: {
+        [WS_ID]: [
+          { id: "user-1", workspace_id: WS_ID, chat_session_id: WS_ID, role: "User", content: "fix", cost_usd: null, duration_ms: null, created_at: "", thinking: null, input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null },
+          { id: "a1", workspace_id: WS_ID, chat_session_id: WS_ID, role: "Assistant", content: "ok", cost_usd: null, duration_ms: null, created_at: "", thinking: null, input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null },
+          { id: "user-2", workspace_id: WS_ID, chat_session_id: WS_ID, role: "User", content: "继续", cost_usd: null, duration_ms: null, created_at: "", thinking: null, input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null },
+        ],
+      },
+      toolActivities: {
+        [WS_ID]: [
+          {
+            toolUseId: "tool-1",
+            toolName: "Bash",
+            inputJson: "{}",
+            resultText: "",
+            collapsed: true,
+            summary: "",
+            turnStartUserId: "user-1",
+          },
+        ],
+      },
+    });
+
+    useAppStore.getState().finalizeTurn(WS_ID, 1);
+
+    const turns = useAppStore.getState().completedTurns[WS_ID];
+    expect(turns).toHaveLength(1);
+    expect(turns[0].afterMessageIndex).toBe(2);
+  });
+
+  it("stamps turnStartUserId from the current turn-start user", () => {
+    useAppStore.setState({
+      chatMessages: {
+        [WS_ID]: [
+          { id: "user-1", workspace_id: WS_ID, chat_session_id: WS_ID, role: "User", content: "fix", cost_usd: null, duration_ms: null, created_at: "", thinking: null, input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null },
+          { id: "a1", workspace_id: WS_ID, chat_session_id: WS_ID, role: "Assistant", content: "ok", cost_usd: null, duration_ms: null, created_at: "", thinking: null, input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null },
+        ],
+      },
+    });
+    useAppStore.getState().addToolActivity(WS_ID, {
+      toolUseId: "bash-1",
+      toolName: "Bash",
+      inputJson: "{}",
+      resultText: "",
+      collapsed: true,
+      summary: "",
+    });
+    expect(useAppStore.getState().toolActivities[WS_ID][0].turnStartUserId).toBe(
+      "user-1",
+    );
+  });
+
   it("records afterMessageIndex as current chatMessages length", () => {
     useAppStore.setState({
       chatMessages: {

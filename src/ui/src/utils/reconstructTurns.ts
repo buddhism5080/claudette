@@ -90,6 +90,7 @@ export function reconstructCompletedTurns(
         collapsed: true,
         summary: a.summary,
         assistantMessageOrdinal: a.assistant_message_ordinal,
+        turnStartUserId: a.user_message_id || td.message_id,
         agentTaskId: a.agent_task_id,
         agentDescription: a.agent_description,
         agentLastToolName: a.agent_last_tool_name,

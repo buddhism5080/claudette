@@ -27,6 +27,61 @@ export function lastTurnStartUserIndex<
   return -1;
 }
 
+/** First later turn-start User after `userIdx`, or `messages.length`. */
+export function nextTurnStartExclusive<
+  T extends { role: string; parent_message_id?: string | null },
+>(messages: readonly T[], userIdx: number): number {
+  for (let i = userIdx + 1; i < messages.length; i++) {
+    if (isTurnStartUser(messages[i])) return i;
+  }
+  return messages.length;
+}
+
+export function turnStartUserIndexForActivity<
+  T extends { id: string; role: string; parent_message_id?: string | null },
+>(
+  messages: readonly T[],
+  turnStartUserId: string | undefined,
+  fallbackUserIdx: number,
+): number {
+  if (turnStartUserId) {
+    const idx = messages.findIndex((msg) => msg.id === turnStartUserId);
+    if (idx >= 0) return idx;
+  }
+  return fallbackUserIdx;
+}
+
+/** Layout slot for one tool card. Frozen to the user that owned the tool
+ *  when it appeared — a later turn-start User or a steer must not move it. */
+export function toolActivityRenderPosition<
+  T extends { id: string; role: string; parent_message_id?: string | null },
+>(
+  messages: readonly T[],
+  activity: { assistantMessageOrdinal?: number; turnStartUserId?: string },
+  globalOffset: number,
+  fallbackUserIdx: number,
+): number {
+  const userIdx = turnStartUserIndexForActivity(
+    messages,
+    activity.turnStartUserId,
+    fallbackUserIdx,
+  );
+  const end =
+    userIdx >= 0 ? nextTurnStartExclusive(messages, userIdx) : messages.length;
+  const tailPosition = globalOffset + end;
+  if (userIdx === -1) return tailPosition;
+  const ordinal = activity.assistantMessageOrdinal;
+  if (typeof ordinal !== "number" || ordinal < 0) return tailPosition;
+  if (ordinal === 0) return globalOffset + userIdx + 1;
+  const assistantPositions: number[] = [];
+  for (let idx = userIdx + 1; idx < end; idx++) {
+    if (messages[idx]?.role === "Assistant") {
+      assistantPositions.push(globalOffset + idx + 1);
+    }
+  }
+  return assistantPositions[ordinal - 1] ?? tailPosition;
+}
+
 export function findTriggeringUserIndex(
   messages: ChatMessage[],
   afterMessageIndex: number,

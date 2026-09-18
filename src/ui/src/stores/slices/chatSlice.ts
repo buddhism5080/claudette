@@ -12,6 +12,10 @@ import type { WorkflowProgressEntry } from "../../types/workflow";
 import type { AppState } from "../useAppStore";
 import { upsertPersistedMessageById } from "../../hooks/useAgentStreamLogic";
 import {
+  lastTurnStartUserIndex,
+  nextTurnStartExclusive,
+} from "../../utils/chatTurnFooter";
+import {
   appendStreamingDelta,
   startStreamingBlock,
   type StreamingTimelineItem,
@@ -28,6 +32,9 @@ export interface ToolActivity {
   summary: string;
   startedAt?: string;
   assistantMessageOrdinal?: number;
+  /** Turn-start User this card appeared under. Layout must keep using this
+   *  id after a later prompt or steer is appended. */
+  turnStartUserId?: string;
   agentTaskId?: string | null;
   agentDescription?: string | null;
   agentLastToolName?: string | null;
@@ -662,12 +669,22 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
       toolActivities: { ...s.toolActivities, [sessionId]: activities },
     })),
   addToolActivity: (sessionId, activity) =>
-    set((s) => ({
-      toolActivities: {
-        ...s.toolActivities,
-        [sessionId]: [...(s.toolActivities[sessionId] || []), activity],
-      },
-    })),
+    set((s) => {
+      const msgs = s.chatMessages[sessionId] || [];
+      const userIdx = lastTurnStartUserIndex(msgs);
+      const turnStartUserId =
+        activity.turnStartUserId ??
+        (userIdx >= 0 ? msgs[userIdx]?.id : undefined);
+      return {
+        toolActivities: {
+          ...s.toolActivities,
+          [sessionId]: [
+            ...(s.toolActivities[sessionId] || []),
+            { ...activity, turnStartUserId },
+          ],
+        },
+      };
+    }),
   updateToolActivity: (sessionId, toolUseId, updates) =>
     set((s) => {
       const live = s.toolActivities[sessionId] || [];
@@ -801,14 +818,19 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
         });
         return {};
       }
-      const loadedCount = (s.chatMessages[sessionId] || []).length;
+      const msgs = s.chatMessages[sessionId] || [];
+      const loadedCount = msgs.length;
       const pagination = s.chatPagination[sessionId];
-      // For paginated sessions, afterMessageIndex must be the GLOBAL position
-      // (i.e. totalCount) so the turn summary renders at the right spot even
-      // when only a window of the message history is loaded.
-      const afterMessageIndex = pagination
-        ? pagination.totalCount
-        : loadedCount;
+      const windowOffset = pagination
+        ? Math.max(0, pagination.totalCount - loadedCount)
+        : 0;
+      const anchorId = activities.find((a) => a.turnStartUserId)?.turnStartUserId;
+      let localEnd = loadedCount;
+      if (anchorId) {
+        const userIdx = msgs.findIndex((m) => m.id === anchorId);
+        if (userIdx >= 0) localEnd = nextTurnStartExclusive(msgs, userIdx);
+      }
+      const afterMessageIndex = windowOffset + localEnd;
       const turn: CompletedTurn = {
         id: turnId ?? crypto.randomUUID(),
         activities: activities.map((a) => ({
@@ -820,6 +842,7 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (
           summary: a.summary,
           startedAt: a.startedAt,
           assistantMessageOrdinal: a.assistantMessageOrdinal,
+          turnStartUserId: a.turnStartUserId,
           agentTaskId: a.agentTaskId,
           agentDescription: a.agentDescription,
           agentLastToolName: a.agentLastToolName,

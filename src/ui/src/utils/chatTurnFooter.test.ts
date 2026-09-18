@@ -5,6 +5,8 @@ import {
   assistantTextForTurn,
   buildPlainTurnFooters,
   findTriggeringUserIndex,
+  lastTurnStartUserIndex,
+  toolActivityRenderPosition,
 } from "./chatTurnFooter";
 
 function msg(
@@ -172,5 +174,54 @@ describe("chat turn footer derivation", () => {
     expect([...result.keys()]).toEqual([4]);
     expect(result.get(4)?.userIdx).toBe(0);
     expect(result.get(4)?.assistantText).toBe("searching\n\nok");
+  });
+
+  it("keeps a prior-turn tool position above a later turn-start user", () => {
+    const messages = [
+      msg("user-1", "User", "fix the indent"),
+      msg("a1", "Assistant", "再跑编译和测试。"),
+      msg("user-2", "User", "继续"),
+    ];
+    expect(
+      toolActivityRenderPosition(
+        messages,
+        { assistantMessageOrdinal: 0, turnStartUserId: "user-1" },
+        0,
+        lastTurnStartUserIndex(messages),
+      ),
+    ).toBe(1);
+  });
+
+  it("places a new-turn tool after the new user", () => {
+    const messages = [
+      msg("user-1", "User", "fix the indent"),
+      msg("a1", "Assistant", "再跑编译和测试。"),
+      msg("user-2", "User", "继续"),
+    ];
+    expect(
+      toolActivityRenderPosition(
+        messages,
+        { assistantMessageOrdinal: 0, turnStartUserId: "user-2" },
+        0,
+        lastTurnStartUserIndex(messages),
+      ),
+    ).toBe(3);
+  });
+
+  it("does not treat a steer as a new tool-position boundary", () => {
+    const messages = [
+      msg("prompt", "User", "look this up"),
+      msg("a1", "Assistant", "searching"),
+      msg("steer", "User", "don't edit yet", "prompt"),
+      msg("a2", "Assistant", "ok"),
+    ];
+    expect(
+      toolActivityRenderPosition(
+        messages,
+        { assistantMessageOrdinal: 0, turnStartUserId: "prompt" },
+        0,
+        lastTurnStartUserIndex(messages),
+      ),
+    ).toBe(1);
   });
 });
