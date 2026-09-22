@@ -167,7 +167,14 @@ fn not_a_repo(err: git::GitError) -> OpsError {
     }
 }
 
-async fn ensure_repository(db: &Database, main_path: &str) -> Result<(Repository, bool), OpsError> {
+/// `&mut Database` (not `&Database`) so this future stays `Send`. The
+/// connection is `Send + !Sync`; a shared borrow held across the git
+/// awaits would make the Tauri command future `!Send` (Windows sideload
+/// `E0277` on `RefCell<InnerConnection>`).
+async fn ensure_repository(
+    db: &mut Database,
+    main_path: &str,
+) -> Result<(Repository, bool), OpsError> {
     if let Some(existing) = repository_for_path(db, main_path)? {
         return Ok((existing, false));
     }
@@ -333,6 +340,21 @@ mod tests {
 
     fn worktree_paths(list: &[git::WorktreeInfo]) -> Vec<String> {
         list.iter().map(|wt| wt.path.clone()).collect()
+    }
+
+    /// The Tauri command future must be `Send`. A shared `&Database` across
+    /// an await fails that bound; this fails compilation if it regresses.
+    #[test]
+    fn adopt_folder_future_is_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("empty");
+        std::fs::create_dir(&dir).unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let hooks = RecordingHooks::default();
+        let fut = adopt_folder_as_workspace(&mut db, &hooks, &dir);
+        assert_send(&fut);
     }
 
     #[tokio::test]
