@@ -302,6 +302,45 @@ pub async fn main_repository_path(path: &str) -> Result<String, GitError> {
     Ok(crate::path::strip_verbatim_prefix(&canon.to_string_lossy()).to_string())
 }
 
+/// True when `err` means `path` is not inside a git checkout at all.
+pub fn is_missing_git_repo(err: &GitError) -> bool {
+    match err {
+        GitError::NotAGitRepo => true,
+        GitError::CommandFailed(msg) => msg.to_lowercase().contains("not a git repository"),
+        GitError::CliNotFound => false,
+    }
+}
+
+/// Make `path` a normal checkout on `main` with a single empty commit.
+///
+/// Existing files are left untracked. This is the same bootstrap the "create
+/// project" command uses, so a folder that was not a repository can still be
+/// opened as a workspace without `git worktree add`.
+pub async fn init_checkout_with_empty_commit(path: &str) -> Result<(), GitError> {
+    if !Path::new(path).is_dir() {
+        return Err(GitError::NotAGitRepo);
+    }
+    run_git(path, &["init", "-b", "main"]).await?;
+    // Repo-local identity only, matching `init_repository`. The empty commit
+    // must succeed even when the user has no global git config.
+    run_git(path, &["config", "user.email", "claudette@localhost"]).await?;
+    run_git(path, &["config", "user.name", "Claudette"]).await?;
+    // `-c commit.gpgsign=false` keeps a drag-drop from blocking on a signer.
+    run_git(
+        path,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
 /// Result of reading a file's blob at an arbitrary revision via
 /// [`read_blob_at_revision`]. The "revision" can be `HEAD` or a full 40-char
 /// commit SHA (validated by `validate_revision`).

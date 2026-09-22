@@ -30,9 +30,9 @@ Both open the **Existing worktrees found** dialog, which lists each untracked wo
 
 ## Open a folder you already have
 
-Drag a folder onto the workspace list in the sidebar. Claudette opens it as a workspace named after the folder and uses that directory as the working directory. It does **not** create a new git worktree or branch.
+Drag a folder onto the workspace list in the sidebar. Claudette opens it as a workspace named after the folder and uses that directory as the working directory. It does **not** create a linked git worktree.
 
-The folder has to be inside a git checkout (the repository root, a subdirectory, or an existing linked worktree). If that repository is not in Claudette yet, it is added automatically. Dropping the same folder again selects the workspace that already points at it. A detached HEAD is refused — check out a branch first. A file dropped on the list is rejected. Drops elsewhere in the window still attach to the chat.
+If the folder is already inside a git checkout (the repository root, a subdirectory, or an existing linked worktree), that checkout is used as-is and no branch is created. If it is not a git checkout at all — an empty folder, or a folder of ordinary files — Claudette runs `git init` in that folder and adds one empty commit on `main`, the same bootstrap as creating a new project. Existing files stay untracked; nothing in the folder is staged. Dropping the same folder again selects the workspace that already points at it. A detached HEAD is refused — check out a branch first. A file dropped on the list is rejected. Drops elsewhere in the window still attach to the chat.
 
 ## Branch Naming
 

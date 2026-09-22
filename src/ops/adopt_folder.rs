@@ -60,9 +60,18 @@ pub async fn adopt_folder_as_workspace(
     }
 
     let folder_canon = canon_string(folder)?;
-    let main_path = git::main_repository_path(&folder_canon)
-        .await
-        .map_err(not_a_repo)?;
+    let main_path = match git::main_repository_path(&folder_canon).await {
+        Ok(path) => path,
+        Err(err) if git::is_missing_git_repo(&err) => {
+            // Empty folders and ordinary non-git directories have nothing to
+            // attach to. Bootstrap a checkout in place — one empty commit,
+            // no `git add` — then register that directory. This does not
+            // create a linked worktree.
+            git::init_checkout_with_empty_commit(&folder_canon).await?;
+            git::main_repository_path(&folder_canon).await?
+        }
+        Err(err) => return Err(not_a_repo(err)),
+    };
     let branch = git::current_branch(&folder_canon).await.map_err(|err| {
         let msg = err.to_string();
         if msg.contains("detached HEAD") {
@@ -478,12 +487,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adopt_rejects_a_file_and_a_non_git_directory() {
+    async fn adopt_rejects_a_file() {
         let parent = tempfile::tempdir().unwrap();
         let file = parent.path().join("notes.txt");
         std::fs::write(&file, "hi").unwrap();
-        let plain = parent.path().join("plain");
-        std::fs::create_dir(&plain).unwrap();
 
         let db_dir = tempfile::tempdir().unwrap();
         let mut db = Database::open(&db_dir.path().join("test.db")).unwrap();
@@ -493,13 +500,99 @@ mod tests {
             .await
             .unwrap_err();
         assert!(file_err.to_string().contains("folder"), "{file_err}");
-
-        let dir_err = adopt_folder_as_workspace(&mut db, &hooks, &plain)
-            .await
-            .unwrap_err();
-        assert!(dir_err.to_string().contains("git repository"), "{dir_err}");
         assert!(db.list_repositories().unwrap().is_empty());
         assert!(db.list_workspaces().unwrap().is_empty());
+    }
+
+    async fn git_stdout(repo: &Path, args: &[&str]) -> String {
+        let output = crate::process::command("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    #[tokio::test]
+    async fn adopt_empty_directory_inits_a_checkout_without_a_worktree() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("empty-notes");
+        std::fs::create_dir(&dir).unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let hooks = RecordingHooks::default();
+        let out = adopt_folder_as_workspace(&mut db, &hooks, &dir)
+            .await
+            .unwrap();
+
+        assert!(out.created_repository);
+        assert!(out.created_workspace);
+        assert_eq!(out.workspace.name, "empty-notes");
+        assert_eq!(out.workspace.branch_name, "main");
+        assert_eq!(
+            canon_key(Path::new(out.workspace.worktree_path.as_deref().unwrap())),
+            canon_key(&dir)
+        );
+        let worktrees = git::list_worktrees(dir.to_str().unwrap()).await.unwrap();
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(
+            git_stdout(&dir, &["rev-list", "--count", "HEAD"])
+                .await
+                .trim(),
+            "1"
+        );
+        assert_eq!(git_stdout(&dir, &["ls-tree", "-r", "HEAD"]).await, "");
+        assert_eq!(git_stdout(&dir, &["status", "--porcelain"]).await, "");
+    }
+
+    #[tokio::test]
+    async fn adopt_non_git_directory_leaves_existing_files_untracked() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("scratch");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("secret.txt"), "do not commit").unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let hooks = RecordingHooks::default();
+        let out = adopt_folder_as_workspace(&mut db, &hooks, &dir)
+            .await
+            .unwrap();
+
+        assert_eq!(out.workspace.name, "scratch");
+        assert_eq!(out.workspace.branch_name, "main");
+        assert_eq!(
+            git_stdout(&dir, &["rev-list", "--count", "HEAD"])
+                .await
+                .trim(),
+            "1"
+        );
+        assert_eq!(git_stdout(&dir, &["ls-tree", "-r", "HEAD"]).await, "");
+        let status = git_stdout(&dir, &["status", "--porcelain"]).await;
+        assert!(
+            status.lines().any(|line| line.ends_with("secret.txt")),
+            "{status}"
+        );
+        let worktrees = git::list_worktrees(dir.to_str().unwrap()).await.unwrap();
+        assert_eq!(worktrees.len(), 1);
+
+        let again = adopt_folder_as_workspace(&mut db, &hooks, &dir)
+            .await
+            .unwrap();
+        assert!(!again.created_workspace);
+        assert_eq!(
+            git_stdout(&dir, &["rev-list", "--count", "HEAD"])
+                .await
+                .trim(),
+            "1"
+        );
     }
 
     #[tokio::test]
