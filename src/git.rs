@@ -249,6 +249,59 @@ pub async fn validate_repo(path: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Absolute path of the primary checkout that owns `path`.
+///
+/// For a normal clone or a subdirectory of one, this is that clone's root.
+/// For a linked worktree, this is the main working tree — not the linked
+/// checkout — so Claudette can attach the folder to the repository it
+/// already tracks. Submodules fall back to their own toplevel.
+pub async fn main_repository_path(path: &str) -> Result<String, GitError> {
+    validate_repo(path).await?;
+    let bare = run_git(path, &["rev-parse", "--is-bare-repository"]).await?;
+    if bare == "true" {
+        return Err(GitError::CommandFailed(
+            "Bare repositories cannot be opened as a workspace".into(),
+        ));
+    }
+
+    let common = run_git(path, &["rev-parse", "--git-common-dir"]).await?;
+    let common_path = Path::new(&common);
+    let common_abs = if common_path.is_absolute() {
+        common_path.to_path_buf()
+    } else {
+        // Relative to the directory we passed via `git -C`, not the toplevel.
+        Path::new(path).join(common_path)
+    };
+    let common_canon = std::fs::canonicalize(&common_abs)
+        .map_err(|e| GitError::CommandFailed(format!("git common dir: {e}")))?;
+
+    let main = if common_canon.file_name().and_then(|n| n.to_str()) == Some(".git") {
+        common_canon
+            .parent()
+            .ok_or_else(|| {
+                GitError::CommandFailed("git common dir has no parent directory".into())
+            })?
+            .to_path_buf()
+    } else {
+        // Submodule git dirs live under `.git/modules/<name>`, which is not
+        // itself a working tree. The toplevel of `path` is the checkout the
+        // user actually has.
+        let toplevel = run_git(path, &["rev-parse", "--show-toplevel"]).await?;
+        let toplevel_path = Path::new(&toplevel);
+        let toplevel_abs = if toplevel_path.is_absolute() {
+            toplevel_path.to_path_buf()
+        } else {
+            Path::new(path).join(toplevel_path)
+        };
+        std::fs::canonicalize(&toplevel_abs)
+            .map_err(|e| GitError::CommandFailed(format!("git toplevel: {e}")))?
+    };
+
+    let canon = std::fs::canonicalize(&main)
+        .map_err(|e| GitError::CommandFailed(format!("repository path: {e}")))?;
+    Ok(crate::path::strip_verbatim_prefix(&canon.to_string_lossy()).to_string())
+}
+
 /// Result of reading a file's blob at an arbitrary revision via
 /// [`read_blob_at_revision`]. The "revision" can be `HEAD` or a full 40-char
 /// commit SHA (validated by `validate_revision`).

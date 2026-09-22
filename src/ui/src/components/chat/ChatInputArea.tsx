@@ -18,6 +18,7 @@ import type {
   StoredAttachment,
 } from "../../types/chat";
 import { base64ToBytes } from "../../utils/base64";
+import { dragTargetIsWorkspaceList, isWorkspaceListFileDrop } from "../../utils/workspaceListDrop";
 import {
   MAX_ATTACHMENTS,
   SUPPORTED_ATTACHMENT_TYPES,
@@ -961,6 +962,15 @@ export function ChatInputArea({
       return getCurrentWebview()
         .onDragDropEvent((event) => {
           if (cancelled) return;
+          if (
+            event.payload.type !== "leave" &&
+            isWorkspaceListFileDrop(event.payload.position)
+          ) {
+            // Folder drops on the workspace list open a workspace. Don't
+            // also turn them into chat attachments.
+            setDragActive(false);
+            return;
+          }
           if (event.payload.type === "enter" || event.payload.type === "over") {
             setDragActive(true);
           } else if (event.payload.type === "leave") {
@@ -1018,6 +1028,10 @@ export function ChatInputArea({
 
     const handleDragEnter = (e: DragEvent) => {
       if (tauriDragListenerActive.current) return;
+      if (dragTargetIsWorkspaceList(e.target)) {
+        setDragActive(false);
+        return;
+      }
       if (!e.dataTransfer?.types.includes("Files")) return;
       e.preventDefault();
       setDragActive(true);
@@ -1031,6 +1045,10 @@ export function ChatInputArea({
 
     const handleDrop = (e: DragEvent) => {
       if (tauriDragListenerActive.current) return;
+      if (dragTargetIsWorkspaceList(e.target)) {
+        setDragActive(false);
+        return;
+      }
       if (!e.dataTransfer?.types.includes("Files")) return;
       e.preventDefault();
       e.stopPropagation();

@@ -108,6 +108,34 @@ pub async fn create_workspace(
     .await
 }
 
+/// Register a dropped folder as a workspace named after that folder.
+///
+/// Unlike [`create_workspace`], this does not allocate a branch or run
+/// `git worktree add`. The folder itself is the workspace directory.
+#[tauri::command]
+pub async fn adopt_folder_as_workspace(
+    path: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<claudette::ops::adopt_folder::AdoptFolderOutput, String> {
+    let mut db = Database::open(&state.db_path).map_err(|e| e.to_string())?;
+    let hooks = TauriHooks::new(app.clone());
+    let out = claudette::ops::adopt_folder::adopt_folder_as_workspace(
+        &mut db,
+        hooks.as_ref(),
+        Path::new(&path),
+    )
+    .await
+    .map_err(|e| {
+        let err = e.to_string();
+        crate::missing_cli::handle_err(&app, &err).unwrap_or(err)
+    })?;
+    if out.created_repository {
+        crate::commands::env::spawn_repo_env_warmup(app, out.repository.id.clone());
+    }
+    Ok(out)
+}
+
 /// Shared implementation of the GUI's `create_workspace` command.
 ///
 /// The IPC handler (`src-tauri/src/ipc.rs::handle_create_workspace`)

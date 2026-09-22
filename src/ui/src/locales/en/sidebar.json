@@ -84,5 +84,7 @@
   "no_repos": "No local repositories yet — add one from the toolbar below.",
   "no_workspaces": "No workspaces yet.",
   "no_workspaces_repo_filter": "No workspaces match this repo filter.",
-  "nothing_to_show": "Nothing to show."
+  "nothing_to_show": "Nothing to show.",
+  "drop_folder_hint": "Drop a folder to open it as a workspace",
+  "drop_folder_failed": "Couldn't open folder as a workspace: {{error}}"
 }

@@ -42,6 +42,52 @@ pub fn is_valid_workspace_name(name: &str) -> bool {
         && !name.ends_with('-')
 }
 
+/// Longest folder-derived workspace name we will store. Folder basenames are
+/// kept verbatim (spaces and non-ASCII included); this only rejects names
+/// that cannot be a single path segment.
+const MAX_FOLDER_WORKSPACE_NAME_CHARS: usize = 200;
+const MAX_FOLDER_NAME_ATTEMPTS: usize = 10_000;
+
+/// Display name for a folder the user dropped onto the workspace list.
+///
+/// The basename is kept as-is — including spaces and non-ASCII — so the
+/// sidebar row matches the folder. [`is_valid_workspace_name`] is intentionally
+/// not applied: that check exists so *generated* names are safe git branch
+/// names, and adopting a folder does not create a branch from the name.
+///
+/// When `taken` already contains the basename, `-2`, `-3`, … is appended.
+pub fn workspace_name_for_folder(
+    folder_name: &str,
+    taken: &std::collections::HashSet<String>,
+) -> Result<String, String> {
+    let base = folder_name.trim();
+    let unsafe_name = base.is_empty()
+        || base == "."
+        || base == ".."
+        || base
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\')
+        || base.chars().count() > MAX_FOLDER_WORKSPACE_NAME_CHARS;
+    if unsafe_name {
+        return Err(format!(
+            "Cannot use folder name {folder_name:?} as a workspace name"
+        ));
+    }
+    if !taken.contains(base) {
+        return Ok(base.to_string());
+    }
+    for n in 2..MAX_FOLDER_NAME_ATTEMPTS {
+        let candidate = format!("{base}-{n}");
+        if candidate.chars().count() > MAX_FOLDER_WORKSPACE_NAME_CHARS {
+            break;
+        }
+        if !taken.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err("Could not allocate a unique workspace name".into())
+}
+
 pub async fn allocate_workspace_name(
     repo: &Repository,
     workspaces: &[Workspace],
@@ -321,5 +367,39 @@ mod tests {
 
         assert_eq!(allocation.name, "dusty-dandelion");
         assert_eq!(allocation.branch_name, "user/dusty-dandelion");
+    }
+
+    #[test]
+    fn folder_name_keeps_spaces_and_non_ascii() {
+        let taken = std::collections::HashSet::new();
+        assert_eq!(
+            workspace_name_for_folder("My Project", &taken).unwrap(),
+            "My Project"
+        );
+        assert_eq!(
+            workspace_name_for_folder("我的项目", &taken).unwrap(),
+            "我的项目"
+        );
+        assert_eq!(
+            workspace_name_for_folder("demo-repo", &taken).unwrap(),
+            "demo-repo"
+        );
+    }
+
+    #[test]
+    fn folder_name_suffixes_when_taken() {
+        let taken = ["pkg".to_string(), "pkg-2".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(workspace_name_for_folder("pkg", &taken).unwrap(), "pkg-3");
+    }
+
+    #[test]
+    fn folder_name_rejects_path_segments() {
+        let taken = std::collections::HashSet::new();
+        assert!(workspace_name_for_folder("", &taken).is_err());
+        assert!(workspace_name_for_folder(".", &taken).is_err());
+        assert!(workspace_name_for_folder("..", &taken).is_err());
+        assert!(workspace_name_for_folder("a/b", &taken).is_err());
     }
 }

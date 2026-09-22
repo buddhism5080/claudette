@@ -82,5 +82,7 @@
   "no_repos": "尚无本地仓库 — 从下方工具栏添加一个。",
   "no_workspaces": "尚无工作区。",
   "no_workspaces_repo_filter": "没有工作区匹配此仓库筛选。",
-  "nothing_to_show": "无内容可显示。"
+  "nothing_to_show": "无内容可显示。",
+  "drop_folder_hint": "把文件夹拖到这里，按文件夹名打开为工作区",
+  "drop_folder_failed": "无法把文件夹打开为工作区：{{error}}"
 }

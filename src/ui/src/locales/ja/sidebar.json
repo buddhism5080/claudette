@@ -82,5 +82,7 @@
   "no_repos": "ローカルリポジトリがまだありません — 下のツールバーから追加してください。",
   "no_workspaces": "ワークスペースがまだありません。",
   "no_workspaces_repo_filter": "このリポジトリフィルターに一致するワークスペースはありません。",
-  "nothing_to_show": "表示する項目がありません。"
+  "nothing_to_show": "表示する項目がありません。",
+  "drop_folder_hint": "フォルダをドロップして同名のワークスペースとして開く",
+  "drop_folder_failed": "フォルダをワークスペースとして開けませんでした: {{error}}"
 }

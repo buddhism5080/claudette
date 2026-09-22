@@ -25,6 +25,7 @@ import {
   interruptPtyForeground,
 } from "../../services/tauri";
 import { createWorkspaceOrchestrated } from "../../hooks/useCreateWorkspace";
+import { useWorkspaceFolderDrop } from "../../hooks/useWorkspaceFolderDrop";
 import { Settings, Link, X, Share2, Plus, Globe, Archive, Trash2, CircleCheck, CircleAlert, CircleQuestionMark, Cog, Filter, LayoutDashboard, CircleDashed, CircleStop, ChevronRight, ChevronDown, ArrowDownAZ, FolderSearch, MessageSquare } from "lucide-react";
 import { resolveScmPrIcon } from "../shared/workspaceStatusIcon";
 import { RepoIcon } from "../shared/RepoIcon";
@@ -264,6 +265,7 @@ export const Sidebar = memo(function Sidebar() {
   // visible for the entire create window. Letting the orchestrator
   // navigate to the new workspace is fine because we want the user
   // to land on the freshly created workspace anyway.
+  const folderDropActive = useWorkspaceFolderDrop();
   const handleCreateWorkspace = useCallback(async (repoId: string) => {
     try {
       await createWorkspaceOrchestrated(repoId);
@@ -968,7 +970,13 @@ export const Sidebar = memo(function Sidebar() {
         </div>
       </div>
 
-      <div className={styles.list}>
+      <div
+        className={folderDropActive ? `${styles.list} ${styles.listDropActive}` : styles.list}
+        data-workspace-list=""
+      >
+        {folderDropActive && (
+          <div className={styles.dropHint}>{t("drop_folder_hint")}</div>
+        )}
         {sidebarGroupBy === "status" && STATUS_BUCKET_ORDER.map((key) => {
           const bucketWorkspaces = statusBuckets.get(key) ?? [];
           if (bucketWorkspaces.length === 0) return null;

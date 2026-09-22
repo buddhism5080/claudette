@@ -20,6 +20,19 @@ export function createWorkspace(
   });
 }
 
+export interface AdoptFolderResult {
+  workspace: Workspace;
+  repository: import("../../types").Repository;
+  default_session_id: string;
+  created_repository: boolean;
+  created_workspace: boolean;
+}
+
+/** Open an existing folder as a workspace. Does not create a git worktree. */
+export function adoptFolderAsWorkspace(path: string): Promise<AdoptFolderResult> {
+  return invoke("adopt_folder_as_workspace", { path });
+}
+
 export interface ForkWorkspaceResult {
   workspace: Workspace;
   session_resumed: boolean;

@@ -12,6 +12,7 @@
 //! (until we wire it up), and the CLI inherits the GUI's behavior because it
 //! invokes the GUI's own hook implementation over IPC.
 
+pub mod adopt_folder;
 pub mod workspace;
 
 use std::fmt;

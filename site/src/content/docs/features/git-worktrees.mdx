@@ -28,6 +28,12 @@ Worktrees created outside Claudette — `git worktree add` from a terminal, team
 
 Both open the **Existing worktrees found** dialog, which lists each untracked worktree with its branch name, path, and on-disk size. Name each one, select the ones to import, and confirm — Claudette registers them as workspaces. The per-row trash icon deletes a stray worktree from disk instead. When the scan finds nothing, the dialog tells you so.
 
+## Open a folder you already have
+
+Drag a folder onto the workspace list in the sidebar. Claudette opens it as a workspace named after the folder and uses that directory as the working directory. It does **not** create a new git worktree or branch.
+
+The folder has to be inside a git checkout (the repository root, a subdirectory, or an existing linked worktree). If that repository is not in Claudette yet, it is added automatically. Dropping the same folder again selects the workspace that already points at it. A detached HEAD is refused — check out a branch first. A file dropped on the list is rejected. Drops elsewhere in the window still attach to the chat.
+
 ## Branch Naming
 
 New workspace branches are given a random name initially. After your first prompt, the agent automatically renames the branch to something descriptive based on the work being done.

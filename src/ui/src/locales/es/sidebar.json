@@ -82,5 +82,7 @@
   "no_repos": "Aún no hay repositorios locales — añade uno desde la barra de herramientas.",
   "no_workspaces": "Aún no hay espacios de trabajo.",
   "no_workspaces_repo_filter": "Ningún espacio coincide con este filtro de repositorio.",
-  "nothing_to_show": "Nada que mostrar."
+  "nothing_to_show": "Nada que mostrar.",
+  "drop_folder_hint": "Suelta una carpeta para abrirla como espacio de trabajo",
+  "drop_folder_failed": "No se pudo abrir la carpeta como espacio de trabajo: {{error}}"
 }

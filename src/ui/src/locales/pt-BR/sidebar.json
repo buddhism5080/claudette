@@ -82,5 +82,7 @@
   "no_repos": "Ainda não há repositórios locais — adicione um na barra de ferramentas abaixo.",
   "no_workspaces": "Ainda não há workspaces.",
   "no_workspaces_repo_filter": "Nenhum workspace corresponde a este filtro de repositório.",
-  "nothing_to_show": "Nada para mostrar."
+  "nothing_to_show": "Nada para mostrar.",
+  "drop_folder_hint": "Solte uma pasta para abri-la como workspace",
+  "drop_folder_failed": "Não foi possível abrir a pasta como workspace: {{error}}"
 }
